@@ -1,0 +1,51 @@
+# --- Ignorar archivos en todas las carpetas recursivamente ---
+
+# Directorios de compilación y caché
+**/build/
+**/out/
+**/CMakeCache.txt
+**/CMakeFiles/
+**/Makefile
+**/install/
+**/compile_commands.json
+
+# Configuraciones de proyecto
+**/sdkconfig
+**/sdkconfig.old
+
+# Artefactos de idf.py
+**/.env
+
+# DevContainer (incluir configuración, ignorar otros archivos)
+!.devcontainer/devcontainer.json
+**/.devcontainer/**
+
+# VS Code (mantener configuraciones clave)
+**/.vscode/
+!.vscode/extensions.json    
+!.vscode/c_cpp_properties.json
+
+# Archivos temporales y de sistema
+**/*~
+**/*.swp
+**/.DS_Store
+**/Thumbs.db
+
+# Entornos virtuales de Python
+**/venv/
+**/.venv/
+
+# Logs
+**/*.log
+
+# Archivos generados por herramientas de terceros
+**/esp-idf/components/**/build/
+**/esp-idf/build/
+
+# Ignorar binarios y artefactos de compilación
+**/*.bin
+**/*.elf
+**/*.hex
+
+# Ignorar archivos de salida de ejemplos y tests
+**/example_*/*/build/
