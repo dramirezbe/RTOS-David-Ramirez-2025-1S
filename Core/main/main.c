@@ -89,7 +89,7 @@ void app_main(void)
     example_ledc_init();
 
     // MORADO = Rojo 50%, Verde 0%, Azul 50%
-    set_rgb_color(128, 0, 128);
-    printf("----------------Ready----------------")
+    set_rgb_color(128, 128, 128);
+    printf("----------------Ready----------------");
 
 }
