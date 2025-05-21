@@ -1,196 +1,123 @@
-/**
- * @file    main.c
- * @brief   Demonstrates basic usage of the GPIO‑RGB PWM library.
- *
- * This example performs the following steps:
- *  1. Initializes three PWM channels for an RGB LED (pins defined below).
- *  2. Sets the LED to a mid‑level blue color using percentage units.
- *  3. Leaves the LED in that state indefinitely.
- *
- * You can adapt the calls to `set_three_channel_duty()` to display any color
- * or brightness level (in percentage, decimal, or 0–255 RGB units) and switch
- * between ANODE/CATHODE wiring modes.
- *
- * @author  David Ramírez Betancourth
- * @author  Santiago Bustamante Montoya
- */
+
+#include "tim_ch_duty.h"
+#include "io_utils.h"
+
+#include <stdio.h>
+#include "driver/ledc.h"
+#include "esp_err.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "driver/ledc.h"
+#include "freertos/queue.h"
+
 #include "driver/gpio.h"
-#include "esp_err.h"
-#include "gpio_handler.h"   // Assumed to provide gpio_three_channel_init and set_three_channel_duty 
+#include "esp_log.h"
 
-typedef enum {
-    IDLE,         // (128,128,128)
-    PURPLE_STATE, // (128,0,128)
-    YELLOW_STATE, // (255,222,89)
-    RED_STATE,    // (255,0,0)
-    GREEN_STATE,  // (0,255,0)
-    BLUE_STATE    // (0,0,255)
-} color_state_t;
+#define R_CHANNEL         LEDC_CHANNEL_0
+#define G_CHANNEL         LEDC_CHANNEL_1
+#define B_CHANNEL         LEDC_CHANNEL_2
+#define R_IO              GPIO_NUM_3
+#define G_IO              GPIO_NUM_4
+#define B_IO              GPIO_NUM_5
+#define LED_FREQUENCY     1000
 
-typedef struct {
-    int r_val;
-    int g_val;
-    int b_val;
-} rgb_state_t;
+#define BTN_R                   GPIO_NUM_25
+#define BTN_G                   GPIO_NUM_33                   
+#define BTN_B                   GPIO_NUM_32
+#define DEBOUNCE_TIME_MS 40
 
-void actual_color_change(color_state_t state, rgb_state_t *rgb_change) {
-    switch (state) {
-        case IDLE:
-            rgb_change->r_val = 128;
-            rgb_change->g_val = 128;
-            rgb_change->b_val = 128;
-            break;
-        case PURPLE_STATE:
-            rgb_change->r_val = 128;
-            rgb_change->g_val = 0;
-            rgb_change->b_val = 128;
-            break;
-        case YELLOW_STATE:
-            rgb_change->r_val = 255;
-            rgb_change->g_val = 222;
-            rgb_change->b_val = 89;
-            break;
-        case RED_STATE:
-            rgb_change->r_val = 255;
-            rgb_change->g_val = 0;
-            rgb_change->b_val = 0;
-            break;
-        case GREEN_STATE:
-            rgb_change->r_val = 0;
-            rgb_change->g_val = 255;
-            rgb_change->b_val = 0;
-            break;
-        case BLUE_STATE:
-            rgb_change->r_val = 0;
-            rgb_change->g_val = 0;
-            rgb_change->b_val = 255;
-            break;
-        default:
-            break;
-    }
-}
+#define ADD_DUTY 25
 
-#define PIN_R           GPIO_NUM_27  
-#define PIN_G           GPIO_NUM_26   
-#define PIN_B           GPIO_NUM_25
-#define BOARD_BUTTON    GPIO_NUM_0
-#define DEBOUNCE_TIME_MS  50
-
-// Queue to notify GPIO events
 static QueueHandle_t gpio_evt_queue = NULL;
 
-// State machine variable (initially IDLE)
-static volatile color_state_t current_state = IDLE;
+uint16_t duty_led_status[3] = {100,100,100};
 
-// Global RGB state variable; initialize to IDLE settings.
-static rgb_state_t rgb_state = {128, 128, 128};
-
-// Variable for debouncing
-static TickType_t last_press_time = 0;
+pwm_timer_config_t timer = {.frequency_hz = 1000, .resolution_bit = LEDC_TIMER_10_BIT, .timer_num = LEDC_TIMER_0};
 
 /**
- * @brief ISR for the button.
- *
- * Sends the GPIO number to the queue to be processed.
- */
+ * One way to do it for each io
+ * 
+pwm_channel_t pwm_r = {.channel = R_CHANNEL, .duty_percent = 0, .gpio_num = R_IO};
+pwm_channel_t pwm_g = {.channel = G_CHANNEL, .duty_percent = 0, .gpio_num = G_IO};
+pwm_channel_t pwm_b = {.channel = B_CHANNEL, .duty_percent = 0, .gpio_num = B_IO};
+*/
+
+rgb_pwm_t led_rgb = {
+    .red   = { .channel = R_CHANNEL, .gpio_num = R_IO, .duty_percent = 0 },
+    .green = { .channel = G_CHANNEL, .gpio_num = G_IO, .duty_percent = 0 },
+    .blue  = { .channel = B_CHANNEL, .gpio_num = B_IO, .duty_percent = 0 }
+};
+
+
 static void IRAM_ATTR gpio_isr_handler(void* arg)
 {
     uint32_t gpio_num = (uint32_t)arg;
     xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL);
 }
 
-/**
- * @brief Task that processes button press events.
- *
- * It debounces input and changes the LED’s color by cycling through the
- * available states.
- */
-static void gpio_button_task(void* arg)
+static void btn_task(void* arg)
 {
-    uint32_t io_num; // GPIO number
+    uint32_t io_num; //gpio_num
+    TickType_t last_press_time = 0;
     
-    while (1) {
+    while(1) {
+
         if (xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY)) {
-            TickType_t now = xTaskGetTickCount();
-            
-            // Debounce check
-            if (((now - last_press_time) * portTICK_PERIOD_MS) >= DEBOUNCE_TIME_MS) {
+            TickType_t now = xTaskGetTickCount(); //Systick
+
+            //Debounce
+            if (is_debounced(now, last_press_time, DEBOUNCE_TIME_MS)) {
                 last_press_time = now;
-                
-                // Cycle through states in order
-                switch (current_state) {
-                    case IDLE:
-                        current_state = PURPLE_STATE;
+
+                //Logic
+                switch(io_num) {
+                    case BTN_R:
+                    duty_led_status[0] = duty_led_status[0] + ADD_DUTY;
+                    printf("Led R duty: %d\n", duty_led_status[0]);
                         break;
-                    case PURPLE_STATE:
-                        current_state = YELLOW_STATE;
+                    case BTN_G:
+                    duty_led_status[1] = duty_led_status[1] + ADD_DUTY;
+                    printf("Led G duty: %d\n", duty_led_status[1]);
                         break;
-                    case YELLOW_STATE:
-                        current_state = RED_STATE;
-                        break;
-                    case RED_STATE:
-                        current_state = GREEN_STATE;
-                        break;
-                    case GREEN_STATE:
-                        current_state = BLUE_STATE;
-                        break;
-                    case BLUE_STATE:
-                        current_state = IDLE;
-                        break;
-                    default:
-                        current_state = IDLE;
+                    case BTN_B:
+                    duty_led_status[2] = duty_led_status[2] + ADD_DUTY;
+                    printf("Led B duty: %d\n", duty_led_status[2]);
                         break;
                 }
-                
-                // Update the current color based on the state
-                actual_color_change(current_state, &rgb_state);
-                
-                // Use the GPIO‑RGB PWM library to update the LED
-                mode_rgb_t mode = ANODE;
-                units_duty_t units = RGB_DUTY;
-                set_three_channel_duty(rgb_state.r_val, rgb_state.g_val, rgb_state.b_val, mode, units);
+
+                for (int i = 0; i < 3; i++) {
+                    if (duty_led_status[i] >= 100) {
+                        duty_led_status[i] = 0;
+                    }
+                }
+                rgb_pwm_set_color(&led_rgb, &timer, duty_led_status[0], duty_led_status[1], duty_led_status[2]);
             }
         }
     }
 }
 
-void app_main(void)
-{
-    // Initialize PWM channels for the RGB LED.
-    gpio_three_channel_init(PIN_R, PIN_G, PIN_B);
 
-    mode_rgb_t mode = ANODE;
-    units_duty_t units = RGB_DUTY;
+void app_main(void) {
+
+    pwm_timer_init(&timer);
+    rgb_pwm_init(&led_rgb, &timer); //set io's pwm
+    rgb_pwm_set_color(&led_rgb, &timer, duty_led_status[0], duty_led_status[1], duty_led_status[2]); //Initial
+
+    gpio_install_isr_service(ESP_INTR_FLAG_LEVEL1 | ESP_INTR_FLAG_IRAM);
+
+    //gpio_num_t io_num, bool is_input, bool pull_up, bool open_drain
+    isr_io_config(BTN_R, true, true, false, GPIO_INTR_NEGEDGE);
+    isr_io_config(BTN_G, true, true, false, GPIO_INTR_NEGEDGE);
+    isr_io_config(BTN_B, true, true, false, GPIO_INTR_NEGEDGE);
     
-    // Set initial LED color (IDLE state)
-    actual_color_change(current_state, &rgb_state);
-    set_three_channel_duty(rgb_state.r_val, rgb_state.g_val, rgb_state.b_val, mode, units);
     
-    // Configure the button GPIO
-    gpio_config_t io_conf = {0};
-    io_conf.intr_type = GPIO_INTR_NEGEDGE;
-    io_conf.mode = GPIO_MODE_INPUT;
-    io_conf.pin_bit_mask = (1ULL << BOARD_BUTTON);
-    io_conf.pull_up_en = 1;
-    io_conf.pull_down_en = 0;
-    gpio_config(&io_conf);
-    
-    // Install GPIO ISR service and add the button handler
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add(BOARD_BUTTON, gpio_isr_handler, (void*) BOARD_BUTTON);
-    
-    // Create the queue to pass GPIO events
+    gpio_isr_handler_add(BTN_R, gpio_isr_handler, (void*) BTN_R);
+    gpio_isr_handler_add(BTN_G, gpio_isr_handler, (void*) BTN_G);
+    gpio_isr_handler_add(BTN_B, gpio_isr_handler, (void*) BTN_B);
+
     gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
-    
-    // Create a task to handle button events
-    xTaskCreate(gpio_button_task, "gpio_button_task", 2048, NULL, 10, NULL);
-    
-    // Main loop: nothing to do here, tasks manage the LED.
-    while (true) {
-        vTaskDelay(portMAX_DELAY);
-    }
+
+    xTaskCreatePinnedToCore(btn_task, "btn_task", 2048, NULL, 4, NULL, 0);
+
+    printf("-------------------Done-------------------");
 }
