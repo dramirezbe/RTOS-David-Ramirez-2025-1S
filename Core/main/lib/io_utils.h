@@ -1,3 +1,9 @@
+/**
+ * @file io_utils.h 
+ * @author David Ramírez Betancourth
+ */
+
+
 #ifndef GPIO_LIB_H
 #define GPIO_LIB_H
 
@@ -5,7 +11,8 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
-#include <stdbool.h>
+#include "freertos/task.h"
+#include "freertos/queue.h"
 
 /**
  * @brief Configure a GPIO pin for input or output, with optional pull-up/down and open-drain.
@@ -46,13 +53,14 @@ void isr_io_config(gpio_num_t      io_num,
  */
 bool is_debounced(TickType_t current_time_ticks, TickType_t last_event_time_ticks, int debounce_time_ms);
 
+
 /**
- * @brief * @brief Initializes the UART with the specified parameters.
+ * @brief Initialize uart driver, configuring uart basics
  *
- * @param port The UART port to initialize (e.g., UART_NUM_0, UART_NUM_1).
- * @param baud_rate The baud rate for the UART communication.
- * @param queue Pointer to the queue handle for UART events.
- * @param buffer_size The size of the UART buffer.
+ * @param port The current UART port.
+ * @param baud_rate transmission speed between the 2 devices.
+ * @param queue Used as a good practice, each uart has it's own queue.
+ * @param buffer_size message RX length
  */
 void init_uart(uart_port_t port, uint32_t baud_rate, QueueHandle_t *queue, uint32_t buffer_size);
 

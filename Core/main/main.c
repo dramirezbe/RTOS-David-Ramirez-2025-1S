@@ -1,32 +1,44 @@
-
-#include "tim_ch_duty.h"
-#include "io_utils.h"
+/**
+ * @file main.c
+ * @author David Ramírez Betancourth
+ * @brief Manages a 10k NTC thermistor (R1) in a 1k (R2) voltage divider.
+ * @details Calculates temperature T using Rt=R0*exp[B(1/T-1/T0)] where R0=10k,
+ * deriving Rt from Vo=Vi[R2/(Rt+R2)] -> Rt = R2(Vi+Vo)/Vo.
+ * Then T = (beta*T0)/(Ln(Rt/R0)*T0 + beta).
+ * Controls an RGB LED via a state machine (Blue <20°C, Green 20-40°C, Red >40°C).
+ * A potentiometer adjusts the duty cycle (brightness) of the active color.
+ * 
+ * Use task for ntc, led and potentiometer
+ */
 
 #include <stdio.h>
-#include "driver/ledc.h"
-#include "esp_err.h"
+#include <math.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 
-#include "driver/gpio.h"
-#include "esp_log.h"
+#include "adc_utils.h"
+#include "tim_ch_duty.h"
 
+//-------------------ADC------------------------
+#define NTC_ADC_CH   ADC_CHANNEL_5 //IO 33
+#define POT_ADC_CH   ADC_CHANNEL_3 //IO 39
+
+
+#define ADC_UNIT      ADC_UNIT_1              
+
+
+#define ADC_ATTEN     ADC_ATTEN_DB_12
+
+//-------------------RGB-------------------------
 #define R_CHANNEL         LEDC_CHANNEL_0
 #define G_CHANNEL         LEDC_CHANNEL_1
 #define B_CHANNEL         LEDC_CHANNEL_2
-#define R_IO              GPIO_NUM_3
-#define G_IO              GPIO_NUM_4
-#define B_IO              GPIO_NUM_5
+#define R_IO              GPIO_NUM_32
+#define G_IO              GPIO_NUM_35
+#define B_IO              GPIO_NUM_34
 #define LED_FREQUENCY     1000
-
-#define BTN_R                   GPIO_NUM_25
-#define BTN_G                   GPIO_NUM_33                   
-#define BTN_B                   GPIO_NUM_32
-#define DEBOUNCE_TIME_MS 40
-
-#define ADD_DUTY 25
 
 static QueueHandle_t gpio_evt_queue = NULL;
 
@@ -34,90 +46,118 @@ uint16_t duty_led_status[3] = {100,100,100};
 
 pwm_timer_config_t timer = {.frequency_hz = 1000, .resolution_bit = LEDC_TIMER_10_BIT, .timer_num = LEDC_TIMER_0};
 
-/**
- * One way to do it for each io
- * 
-pwm_channel_t pwm_r = {.channel = R_CHANNEL, .duty_percent = 0, .gpio_num = R_IO};
-pwm_channel_t pwm_g = {.channel = G_CHANNEL, .duty_percent = 0, .gpio_num = G_IO};
-pwm_channel_t pwm_b = {.channel = B_CHANNEL, .duty_percent = 0, .gpio_num = B_IO};
-*/
-
 rgb_pwm_t led_rgb = {
     .red   = { .channel = R_CHANNEL, .gpio_num = R_IO, .duty_percent = 0 },
     .green = { .channel = G_CHANNEL, .gpio_num = G_IO, .duty_percent = 0 },
     .blue  = { .channel = B_CHANNEL, .gpio_num = B_IO, .duty_percent = 0 }
 };
 
+adc_config_t ntc_adc_conf = {
+    .unit_id = ADC_UNIT,
+    .channel = NTC_ADC_CH,
+    .atten = ADC_ATTEN,
+    .bitwidth = ADC_BITWIDTH_12,
+};
+adc_channel_handle_t ntc_adc_handle = NULL;
 
-static void IRAM_ATTR gpio_isr_handler(void* arg)
-{
-    uint32_t gpio_num = (uint32_t)arg;
-    xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL);
+adc_config_t pot_adc_conf = {
+    .unit_id = ADC_UNIT,
+    .channel = POT_ADC_CH,
+    .atten = ADC_ATTEN,
+    .bitwidth = ADC_BITWIDTH_12,
+};
+adc_channel_handle_t pot_adc_handle = NULL;
+
+
+void ntc_task() {
+
+    const float beta = 3950.0;
+    const float R0 = 10000.0;
+    const float T0 =  298.15;
+    const float R2 = 1000.0;
+
+    const float Vi = 4.8;
+    float Vo = 0; 
+    float Rt = 0;
+    float T = 0;
+
+    // 1. Configure ADC
+    set_adc(&ntc_adc_conf, &ntc_adc_handle);
+
+    int raw_val = 0;
+    int voltage_mv = 0;
+    
+    while (1)
+    {
+        // 2. Get Raw Data
+        get_raw_data(ntc_adc_handle, &raw_val);
+
+        // 3. Convert to Voltage
+        raw_to_voltage(ntc_adc_handle, raw_val, &voltage_mv);
+        
+        float Vo = voltage_mv / 1000.0;
+        printf("Vout: %.2fV\t", Vo);
+        float Rt = (R2*(Vi+Vo))/Vo;
+        printf("Rt: %.2f\t", Rt);
+
+        float T = (beta*T0)/(log(Rt/R0)*T0 + beta);
+        printf("T: %.2f °C\n------------------------\n", T - 273.15);
+
+        xQueueSend();
+
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+    
 }
 
-static void btn_task(void* arg)
-{
-    uint32_t io_num; //gpio_num
-    TickType_t last_press_time = 0;
+float Vo_pot;
+
+void pot_task() {
+    // 1. Configure ADC
+    set_adc(&pot_adc_conf, &pot_adc_handle);
+
+    int raw_val = 0;
+    int voltage_mv_pot = 0;
     
-    while(1) {
+    while (1)
+    {
+        // 2. Get Raw Data
+        get_raw_data(pot_adc_handle, &raw_val);
 
-        if (xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY)) {
-            TickType_t now = xTaskGetTickCount(); //Systick
+        // 3. Convert to Voltage
+        raw_to_voltage(pot_adc_handle, raw_val, &voltage_mv_pot);
 
-            //Debounce
-            if (is_debounced(now, last_press_time, DEBOUNCE_TIME_MS)) {
-                last_press_time = now;
+        Vo_pot = voltage_mv_pot / 1000.0;
 
-                //Logic
-                switch(io_num) {
-                    case BTN_R:
-                    duty_led_status[0] = duty_led_status[0] + ADD_DUTY;
-                    printf("Led R duty: %d\n", duty_led_status[0]);
-                        break;
-                    case BTN_G:
-                    duty_led_status[1] = duty_led_status[1] + ADD_DUTY;
-                    printf("Led G duty: %d\n", duty_led_status[1]);
-                        break;
-                    case BTN_B:
-                    duty_led_status[2] = duty_led_status[2] + ADD_DUTY;
-                    printf("Led B duty: %d\n", duty_led_status[2]);
-                        break;
-                }
+        vTaskDelay(1000 / portTICK_PERIOD_MS);       
+    }
 
-                for (int i = 0; i < 3; i++) {
-                    if (duty_led_status[i] >= 100) {
-                        duty_led_status[i] = 0;
-                    }
-                }
-                rgb_pwm_set_color(&led_rgb, &timer, duty_led_status[0], duty_led_status[1], duty_led_status[2]);
-            }
+}
+
+
+void handle_duty_task() {
+    while (1)
+    {
+        if(xQueueReceive())
+        {
+            
+
         }
+
     }
 }
 
-
-void app_main(void) {
-
+void app_main(void)
+{
     pwm_timer_init(&timer);
     rgb_pwm_init(&led_rgb, &timer); //set io's pwm
     rgb_pwm_set_color(&led_rgb, &timer, duty_led_status[0], duty_led_status[1], duty_led_status[2]); //Initial
 
-    gpio_install_isr_service(ESP_INTR_FLAG_LEVEL1 | ESP_INTR_FLAG_IRAM);
-
-    //gpio_num_t io_num, bool is_input, bool pull_up, bool open_drain
-    isr_io_config(BTN_R, true, true, false, GPIO_INTR_NEGEDGE);
-    isr_io_config(BTN_G, true, true, false, GPIO_INTR_NEGEDGE);
-    isr_io_config(BTN_B, true, true, false, GPIO_INTR_NEGEDGE);
-    
-    
-    gpio_isr_handler_add(BTN_R, gpio_isr_handler, (void*) BTN_R);
-    gpio_isr_handler_add(BTN_G, gpio_isr_handler, (void*) BTN_G);
-    gpio_isr_handler_add(BTN_B, gpio_isr_handler, (void*) BTN_B);
-
     gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
 
-    xTaskCreatePinnedToCore(btn_task, "btn_task", 2048, NULL, 4, NULL, 0);
+    xTaskCreate(ntc_task, "ntc_task", 2048, NULL, 4, NULL);
+    xTaskCreate(pot_task, "ntc_task", 2048, NULL, 4, NULL);
 
     printf("-------------------Done-------------------");
+
 }

@@ -1,7 +1,5 @@
-//io_utils.c
-
-
 /**
+ * @file io_utils.c
  * @author David Ramírez Betancourth
  * @brief GPIO config macros utils, contains isr configs also
  */
@@ -54,7 +52,6 @@ bool is_debounced(TickType_t current_time_ticks, TickType_t last_event_time_tick
     return ((current_time_ticks - last_event_time_ticks) * portTICK_PERIOD_MS) >= debounce_time_ms;
 }
 
-
 void init_uart(uart_port_t port, uint32_t baud_rate, QueueHandle_t *queue, uint32_t buffer_size) {
 
     uart_config_t config = {
@@ -66,5 +63,5 @@ void init_uart(uart_port_t port, uint32_t baud_rate, QueueHandle_t *queue, uint3
         .source_clk = UART_SCLK_DEFAULT,
     };
     uart_param_config(port, &config);
-    uart_driver_install(port, buffer_size, buffer_size, 10, queue, 0);
+    uart_driver_install(port, buffer_size, buffer_size, 10, queue, 0); // Pass the queue pointer directly
 }
