@@ -8,11 +8,14 @@
 #define GPIO_LIB_H
 
 #include <stdbool.h>
+#include <string.h>
+
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "driver/uart.h"
 
 /**
  * @brief Configure a GPIO pin for input or output, with optional pull-up/down and open-drain.
@@ -53,15 +56,29 @@ void isr_io_config(gpio_num_t      io_num,
  */
 bool is_debounced(TickType_t current_time_ticks, TickType_t last_event_time_ticks, int debounce_time_ms);
 
+/**
+ * @brief Initializes the UART port with specified parameters.
+ *
+ * @param uart_num The UART port number (e.g., UART_NUM_0).
+ * @param baud_rate The baud rate.
+ * @param tx_pin The GPIO pin for TX. Use UART_PIN_NO_CHANGE if not changing.
+ * @param rx_pin The GPIO pin for RX. Use UART_PIN_NO_CHANGE if not changing.
+ * @param rx_buffer_size Size of the receive buffer.
+ * @param tx_buffer_size Size of the transmit buffer (0 for no TX buffer).
+ * @param uart_driver_queue A handle to the FreeRTOS Queue for UART events. Pass NULL if not using.
+ *
+ * @note Other UART parameters (data_bits, parity, stop_bits, flow_ctrl) are set to common defaults (8N1, no flow control).
+ */
+void init_uart(uart_port_t uart_num, int baud_rate, int tx_pin, int rx_pin, int rx_buffer_size, int tx_buffer_size, QueueHandle_t uart_driver_queue);
+
 
 /**
- * @brief Initialize uart driver, configuring uart basics
+ * @brief Macro para comparar dos strings.
  *
- * @param port The current UART port.
- * @param baud_rate transmission speed between the 2 devices.
- * @param queue Used as a good practice, each uart has it's own queue.
- * @param buffer_size message RX length
+ * @param str1 Primer string a comparar.
+ * @param str2 Segundo string a comparar.
+ * @return true si los strings son idénticos, false en caso contrario.
  */
-void init_uart(uart_port_t port, uint32_t baud_rate, QueueHandle_t *queue, uint32_t buffer_size);
+#define COMPARE_STRINGS(str1, str2) (strcmp((const char *)(str1), (const char *)(str2)) == 0)
 
 #endif // GPIO_LIB_H
