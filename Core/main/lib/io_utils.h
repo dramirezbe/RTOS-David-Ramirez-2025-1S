@@ -57,22 +57,6 @@ void isr_io_config(gpio_num_t      io_num,
 bool is_debounced(TickType_t current_time_ticks, TickType_t last_event_time_ticks, int debounce_time_ms);
 
 /**
- * @brief Initializes the UART port with specified parameters.
- *
- * @param uart_num The UART port number (e.g., UART_NUM_0).
- * @param baud_rate The baud rate.
- * @param tx_pin The GPIO pin for TX. Use UART_PIN_NO_CHANGE if not changing.
- * @param rx_pin The GPIO pin for RX. Use UART_PIN_NO_CHANGE if not changing.
- * @param rx_buffer_size Size of the receive buffer.
- * @param tx_buffer_size Size of the transmit buffer (0 for no TX buffer).
- * @param uart_driver_queue A handle to the FreeRTOS Queue for UART events. Pass NULL if not using.
- *
- * @note Other UART parameters (data_bits, parity, stop_bits, flow_ctrl) are set to common defaults (8N1, no flow control).
- */
-void init_uart(uart_port_t uart_num, int baud_rate, int tx_pin, int rx_pin, int rx_buffer_size, int tx_buffer_size, QueueHandle_t uart_driver_queue);
-
-
-/**
  * @brief Macro para comparar dos strings.
  *
  * @param str1 Primer string a comparar.

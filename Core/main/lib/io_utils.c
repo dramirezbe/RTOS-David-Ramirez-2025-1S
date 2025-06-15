@@ -52,23 +52,3 @@ void isr_io_config(gpio_num_t       io_num,
 bool is_debounced(TickType_t current_time_ticks, TickType_t last_event_time_ticks, int debounce_time_ms) {
     return ((current_time_ticks - last_event_time_ticks) * portTICK_PERIOD_MS) >= debounce_time_ms;
 }
-
-void init_uart(uart_port_t uart_num, int baud_rate, int tx_pin, int rx_pin, int rx_buffer_size, int tx_buffer_size, QueueHandle_t uart_driver_queue) {
-    uart_config_t uart_config = {
-        .baud_rate = baud_rate,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .rx_flow_ctrl_thresh = 122, // Default threshold for HW flow control if enabled
-    };
-
-    ESP_ERROR_CHECK(uart_param_config(uart_num, &uart_config));
-    ESP_ERROR_CHECK(uart_set_pin(uart_num, tx_pin, rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
-
-    // CORRECTED: Pass the address of the QueueHandle_t
-    // The 4th argument (queue_size) needs to be the actual size of the queue you want
-    // the driver to use. If uart_driver_queue is NULL, this value is ignored.
-    // Assuming 10 as a default for driver's internal queue for events if a queue is provided.
-    ESP_ERROR_CHECK(uart_driver_install(uart_num, rx_buffer_size, tx_buffer_size, 10, &uart_driver_queue, 0));
-}

@@ -4,12 +4,6 @@
  * @brief ADC config macros utils, also with raw to voltage functions
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "soc/soc_caps.h"
 #include "adc_utils.h"
 
 // Maximum number of ADC channels to support
