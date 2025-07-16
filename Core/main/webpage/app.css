@@ -1,0 +1,166 @@
+/* app.css - Cyberpunk Neon Style */
+
+body {
+    background-color: #0A0A1A; /* Deep dark blue background, inspired by the image */
+    font-family: sans-serif; /* Use default sans-serif font */
+    color: #D0A0FF; /* Lighter purple for general text */
+    margin: 0;
+    padding: 20px;
+    box-sizing: border-box;
+    /* Adding a subtle background gradient to mimic the image */
+    background-image: linear-gradient(to bottom right, #0A0A1A, #1A0A2A);
+}
+
+header {
+    background-color: #151525; /* Darker blue for header, similar to section backgrounds */
+    border-bottom: 2px solid #6A00FF; /* Vibrant electric blue/purple neon border */
+    margin-bottom: 30px;
+    padding: 15px 0;
+    box-shadow: 0 0 20px rgba(76, 42, 240, 0.7); /* Electric blue/purple neon glow effect */
+}
+
+h1 {
+    display: block;
+    text-align: center;
+    margin: 0;
+    padding: 10px;
+    font-size: 2.2em;
+    color: #FFFFFF; /* White for main title to stand out */
+    text-shadow: 0 0 15px #4C2AF0, 0 0 30px #4C2AF0, 0 0 45px #4C2AF0; /* Intense electric blue/purple glow */
+    letter-spacing: 3px;
+    text-transform: uppercase;
+}
+
+h2 {
+    font-size: 1.8em;
+    color: #FF00FF; /* Bright pink/magenta for subheadings */
+    text-shadow: 0 0 10px #FF00FF;
+    margin-top: 30px;
+    margin-bottom: 15px;
+    border-left: 4px solid #FF00FF; /* Pink/magenta border */
+    padding-left: 10px;
+}
+
+h3 {
+    font-size: 1.5em;
+    color: #FF80F0; /* Lighter pink/purple */
+    text-shadow: 0 0 8px #FF80F0;
+}
+
+h4 {
+    font-size: 1.1em;
+    color: #D0A0FF; /* Lighter purple for general text */
+    margin-bottom: 10px;
+}
+
+hr {
+    border: none;
+    border-top: 1px dashed #3A0072; /* Dashed deep purple-blue line for separation */
+    margin: 40px 0;
+}
+
+div {
+    background-color: #151525; /* Dark blue for sections */
+    padding: 25px;
+    margin-bottom: 20px;
+    border: 1px solid #3A0072; /* Deep purple-blue border */
+    border-radius: 8px;
+    box-shadow: 0 0 12px rgba(58, 0, 114, 0.6); /* Inner glow effect with deep purple-blue */
+}
+
+label {
+    color: #FF80F0; /* Pink/purple for labels */
+    font-weight: bold;
+    margin-right: 10px;
+}
+
+#latest_firmware, #latest_firmware_label,
+#temperature_reading, #humidity_reading {
+    display: inline-block;
+    color: #FF00FF; /* Bright pink/magenta for values */
+    font-size: 1.1em;
+    font-weight: bold;
+    text-shadow: 0 0 7px #FF00FF;
+}
+
+.gr {
+    color: #00ff66; /* Neon green for success */
+    text-shadow: 0 0 6px #00ff66;
+}
+.rd {
+    color: #ff3366; /* Neon red for errors */
+    text-shadow: 0 0 6px #ff3366;
+}
+
+.buttons {
+    padding: 15px 0;
+    text-align: center;
+}
+
+input[type="button"] {
+    font-family: sans-serif; /* Use default sans-serif font */
+    font-size: 14px;
+    border: none;
+    line-height: 2.5;
+    padding: 0 15px;
+    margin: 0 10px;
+    text-align: center;
+    color: #FFFFFF; /* White text on buttons */
+    text-shadow: 1px 1px 2px #000;
+    border-radius: 20px;
+    background-color: #3A0072; /* Deep purple-blue base for buttons */
+    background-image: linear-gradient(to bottom right,
+                                      rgba(76, 42, 240, 0.6), /* Electric blue/purple gradient */
+                                      rgba(255, 0, 255, 0.8)); /* Pink/magenta gradient */
+    box-shadow: 0 0 10px rgba(76, 42, 240, 0.8), /* Outer glow with electric blue/purple */
+                inset 0 0 6px rgba(255, 255, 255, 0.3); /* Inner highlight */
+    transition: all 0.3s ease;
+    cursor: pointer;
+}
+
+input[type="button"]:hover {
+    background-color: #4C2AF0; /* Brighter electric blue/purple on hover */
+    background-image: linear-gradient(to bottom right,
+                                      rgba(106, 0, 255, 0.8),
+                                      rgba(255, 51, 204, 0.9)); /* More intense pink/purple */
+    box-shadow: 0 0 20px rgba(76, 42, 240, 1),
+                inset 0 0 10px rgba(255, 255, 255, 0.5);
+    transform: translateY(-2px);
+}
+
+input[type="button"]:active {
+    box-shadow: inset 0 0 12px rgba(0, 0, 0, 0.8),
+                0 0 8px rgba(76, 42, 240, 0.5);
+    transform: translateY(1px);
+}
+
+input[type="file"] {
+    color: #D0A0FF; /* Lighter purple for file input text */
+}
+
+input[type="number"] {
+    background-color: #0A0A1A; /* Dark background for inputs */
+    border: 1px solid #FF00FF; /* Bright pink/magenta border */
+    color: #00ff66; /* Neon green text for input values */
+    font-family: monospace; /* Use default monospace font for input values */
+    padding: 8px 12px;
+    border-radius: 5px;
+    margin: 5px;
+    width: 80px;
+    box-shadow: 0 0 7px rgba(255, 0, 255, 0.6); /* Pink/magenta glow */
+    outline: none;
+    transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+input[type="number"]:focus {
+    border-color: #4C2AF0; /* Electric blue/purple on focus */
+    box-shadow: 0 0 12px rgba(76, 42, 240, 0.8);
+}
+
+section {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+}

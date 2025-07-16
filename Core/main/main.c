@@ -1,363 +1,447 @@
 /**
  * @file main.c
  * @author David Ramírez Betancourth
- *         Santiago Bustamante Montoya
- * @brief Take date and time from the internet with http protocol
- * @details Take date and time from the internet with http protocol and print it in the console
- *
- * Uses FreeRTOS tasks for NTC, LED, and potentiometer, and UART for command input.
- * Uses cJSON to parse the JSON response from the server.
- * Uses esp_http_client to make the HTTP request.
- * Uses esp_wifi to connect to the Wi-Fi network.
- * Uses esp_netif to get the IP address of the device.
- * Uses esp_log to log the messages.
- * Uses nvs_flash to initialize the NVS.
+ * @details Controlar 1 led rgb, leer temp termistor cada 3seg, Botón que active desactive la impresión por consola de la temp (uart),
+ * fijar los límites de la página, tanto por página como por uart (intentar hacer).
  */
 
-#include <esp_wifi.h>
-#include <esp_event.h>
-#include <esp_log.h>
-#include <nvs_flash.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include <esp_http_client.h>
-#include <cJSON.h>
-#include <esp_tls.h>
-#include <esp_netif.h>
-#include <lwip/err.h>
-#include <lwip/sys.h>
+#include "nvs_flash.h"
+#include "driver/gpio.h"
+#include "driver/uart.h"
+#include "freertos/queue.h"
 
-static const char *TAG = "WIFI_STATION";
-static const char *HTTP_TAG = "HTTP_CLIENT";
+#include "adc_utils.h"
+#include "tim_ch_duty.h"
+#include "io_utils.h"
 
-// Variable para indicar si ya tenemos IP
-static bool s_wifi_connected = false;
+#include "wifi_app.h"
+#include "http_server.h"
 
-// Handler para eventos de Wi-Fi
-static void event_handler(void* arg, esp_event_base_t event_base,
-                                int32_t event_id, void* event_data) {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        ESP_LOGI(TAG, "🔄 WIFI_EVENT_STA_START - Iniciando conexión...");
-        esp_wifi_connect();
-        ESP_LOGI(TAG, "Conectando a la red...");
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        wifi_event_sta_disconnected_t* disconnected = (wifi_event_sta_disconnected_t*) event_data;
-        ESP_LOGW(TAG, "🔌 WIFI_EVENT_STA_DISCONNECTED - Razón: %d", disconnected->reason);
-        s_wifi_connected = false;
-        esp_wifi_connect(); // Intentar reconectar
-        ESP_LOGI(TAG, "Desconectado. Intentando reconectar...");
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(TAG, "✅ IP_EVENT_STA_GOT_IP - IP obtenida: " IPSTR, IP2STR(&event->ip_info.ip));
-        ESP_LOGI(TAG, "📡 Máscara de red: " IPSTR, IP2STR(&event->ip_info.netmask));
-        ESP_LOGI(TAG, "🌐 Gateway: " IPSTR, IP2STR(&event->ip_info.gw));
-        s_wifi_connected = true; // Wi-Fi conectado y tenemos IP
-    }
+#include <math.h>
+
+//-------------------ADC-----------------------
+#define NTC_ADC_CH ADC_CHANNEL_5 //IO 33
+#define POT_ADC_CH ADC_CHANNEL_3 //IO 39
+#define ADC_UNIT   ADC_UNIT_1
+#define ADC_ATTEN  ADC_ATTEN_DB_12
+
+#define NTC_DATA_TYPE true
+#define POT_DATA_TYPE false
+
+//-------------------RGB DUTY-----------------------
+#define RD_CHANNEL     LEDC_CHANNEL_0
+#define GD_CHANNEL     LEDC_CHANNEL_1
+#define BD_CHANNEL     LEDC_CHANNEL_2
+#define RD_IO          GPIO_NUM_27
+#define GD_IO          GPIO_NUM_26
+#define BD_IO          GPIO_NUM_25
+#define LED_FREQUENCY 1000
+
+//-------------------RGB TEMP-----------------------
+#define RT_CHANNEL     LEDC_CHANNEL_3
+#define GT_CHANNEL     LEDC_CHANNEL_4
+#define BT_CHANNEL     LEDC_CHANNEL_5
+#define RT_IO          GPIO_NUM_5
+#define GT_IO          GPIO_NUM_18
+#define BT_IO          GPIO_NUM_19
+#define LED_FREQUENCY 1000
+
+#define IS_RGB_COMMON_ANODE false //both
+
+
+
+//-------------------UART----------------------
+#define UART_NUM UART_NUM_0
+#define BUF_SIZE (1024)
+#define RD_BUF_SIZE (BUF_SIZE)
+
+#define BLINK_GPIO 2
+
+//-----------------------------------------Struct----------------------------------------
+typedef struct {
+    char color;
+    float temp_inf;
+    float temp_sup;
+} patron_temp_t;
+
+// Enum for LED color states
+typedef enum {
+    LED_STATE_BLUE,
+    LED_STATE_GREEN,
+    LED_STATE_RED,
+    LED_STATE_NONE // For initial or off state, or if no conditions are met
+} led_color_state_t;
+
+typedef struct {
+    float value;
+    bool type;   // false pot, true ntc
+} adc_type_data_t;
+
+//---------------------------------------Global Vars ------------------------------------
+QueueHandle_t rgb_event_queue;
+QueueHandle_t uart_status_queue;
+QueueHandle_t temp_uart_queue;
+QueueHandle_t temp_http_queue;
+
+static QueueHandle_t adc_data_queue;
+static QueueHandle_t uart_rx_queue;
+
+// Mutex for shared ADC resource
+SemaphoreHandle_t xMutex;
+
+bool uart_on = true;
+
+static uint8_t uart_rx_buffer[RD_BUF_SIZE];
+
+//------------------------------------Config Peripherals-------------------------------------
+
+// LEDC Timer and Channels configuration
+pwm_timer_config_t timer = {.frequency_hz = LED_FREQUENCY, .resolution_bit = LEDC_TIMER_10_BIT, .timer_num = LEDC_TIMER_0};
+
+rgb_pwm_t led_rgb_duty = {
+    .red   = { .channel = RD_CHANNEL, .gpio_num = RD_IO, .duty_percent = 0 },
+    .green = { .channel = GD_CHANNEL, .gpio_num = GD_IO, .duty_percent = 0 },
+    .blue  = { .channel = BD_CHANNEL, .gpio_num = BD_IO, .duty_percent = 0 }
+};
+
+rgb_pwm_t led_rgb_temp = {
+    .red   = { .channel = RT_CHANNEL, .gpio_num = RT_IO, .duty_percent = 0 },
+    .green = { .channel = GT_CHANNEL, .gpio_num = GT_IO, .duty_percent = 0 },
+    .blue  = { .channel = BT_CHANNEL, .gpio_num = BT_IO, .duty_percent = 0 }
+};
+
+// ADC Configurations and Handles
+adc_config_t ntc_adc_conf = {
+    .unit_id = ADC_UNIT,
+    .channel = NTC_ADC_CH,
+    .atten = ADC_ATTEN,
+    .bitwidth = ADC_BITWIDTH_12,
+};
+adc_channel_handle_t ntc_adc_handle = NULL;
+
+adc_config_t pot_adc_conf = {
+    .unit_id = ADC_UNIT,
+    .channel = POT_ADC_CH,
+    .atten = ADC_ATTEN,
+    .bitwidth = ADC_BITWIDTH_12,
+};
+adc_channel_handle_t pot_adc_handle = NULL;
+
+//-----------------------------------Helper Functions------------------------------------------
+
+patron_temp_t patron_level_temp(char *data) {
+    patron_temp_t result_patron = {0}; //Initialize
+
+    sscanf(data, "[%c]%f|%f",
+           &result_patron.color,
+           &result_patron.temp_inf,
+           &result_patron.temp_sup);
+
+    //VERBOSE
+    //printf("Parsed: Color=%c, Temp Inf=%.1f, Temp Sup=%.1f\r\n", result_patron.color, result_patron.temp_inf, result_patron.temp_sup);
+    return result_patron;
 }
 
-// Handler para eventos del cliente HTTP - MÁS VERBOSE
-esp_err_t _http_event_handler(esp_http_client_event_t *evt) {
-    static char *output_buffer;  // Buffer para almacenar la respuesta
-    static int output_len;       // Stores number of bytes read
-    
-    switch(evt->event_id) {
-        case HTTP_EVENT_ERROR:
-            ESP_LOGE(HTTP_TAG, "❌ HTTP_EVENT_ERROR: %s", esp_err_to_name((esp_err_t)evt->data));
+// Change global array
+float temp_levels[3][2];
+void fill_temp_levels(patron_temp_t patron) {
+    switch(patron.color){
+        case 'R':
+            temp_levels[0][0] = patron.temp_inf;
+            temp_levels[0][1] = patron.temp_sup;
+            printf("Updated Red range: %.1f - %.1f\r\n", temp_levels[0][0], temp_levels[0][1]);
             break;
-        case HTTP_EVENT_ON_CONNECTED:
-            ESP_LOGI(HTTP_TAG, "🔗 HTTP_EVENT_ON_CONNECTED - Conectado al servidor");
+        case 'G':
+            temp_levels[1][0] = patron.temp_inf;
+            temp_levels[1][1] = patron.temp_sup;
+            printf("Updated Green range: %.1f - %.1f\r\n", temp_levels[1][0], temp_levels[1][1]);
             break;
-        case HTTP_EVENT_HEADER_SENT:
-            ESP_LOGI(HTTP_TAG, "📤 HTTP_EVENT_HEADER_SENT - Headers enviados");
+        case 'B':
+            temp_levels[2][0] = patron.temp_inf;
+            temp_levels[2][1] = patron.temp_sup;
+            printf("Updated Blue range: %.1f - %.1f\r\n", temp_levels[2][0], temp_levels[2][1]);
             break;
-        case HTTP_EVENT_ON_HEADER:
-            ESP_LOGI(HTTP_TAG, "📥 HTTP_EVENT_ON_HEADER - %s: %s", evt->header_key, evt->header_value);
-            break;
-        case HTTP_EVENT_ON_DATA:
-            ESP_LOGI(HTTP_TAG, "📊 HTTP_EVENT_ON_DATA - Recibidos %d bytes", evt->data_len);
-            ESP_LOGD(HTTP_TAG, "Datos recibidos: %.*s", evt->data_len, (char*)evt->data);
-            
-            // Si no hay buffer de salida, crear uno
-            if (output_buffer == NULL) {
-                output_buffer = (char *) malloc(evt->data_len + 1);
-                output_len = 0;
-                if (output_buffer == NULL) {
-                    ESP_LOGE(HTTP_TAG, "❌ Fallo al asignar memoria para buffer de salida");
-                    return ESP_FAIL;
-                }
-            } else {
-                // Redimensionar el buffer
-                output_buffer = (char *) realloc(output_buffer, output_len + evt->data_len + 1);
-                if (output_buffer == NULL) {
-                    ESP_LOGE(HTTP_TAG, "❌ Fallo al redimensionar buffer de salida");
-                    return ESP_FAIL;
-                }
-            }
-            
-            // Copiar los datos al buffer
-            memcpy(output_buffer + output_len, evt->data, evt->data_len);
-            output_len += evt->data_len;
-            break;
-        case HTTP_EVENT_ON_FINISH:
-            ESP_LOGI(HTTP_TAG, "✅ HTTP_EVENT_ON_FINISH - Petición completada");
-            if (output_buffer != NULL) {
-                output_buffer[output_len] = '\0'; // Terminar string
-                ESP_LOGI(HTTP_TAG, "📝 Respuesta completa (%d bytes):\n%s", output_len, output_buffer);
-                
-                // Parsear JSON aquí
-                cJSON *root = cJSON_Parse(output_buffer);
-                if (root) {
-                    ESP_LOGI(HTTP_TAG, "✅ JSON parseado correctamente");
-                    cJSON *datetime = cJSON_GetObjectItemCaseSensitive(root, "datetime");
-                    if (cJSON_IsString(datetime) && (datetime->valuestring != NULL)) {
-                        ESP_LOGI(HTTP_TAG, "🕐 Fecha y Hora Actual: %s", datetime->valuestring);
-                    } else {
-                        ESP_LOGE(HTTP_TAG, "❌ No se pudo encontrar 'datetime' en la respuesta JSON");
-                    }
-                    
-                    // Mostrar más campos si están disponibles
-                    cJSON *timezone = cJSON_GetObjectItemCaseSensitive(root, "timezone");
-                    if (cJSON_IsString(timezone)) {
-                        ESP_LOGI(HTTP_TAG, "🌍 Zona horaria: %s", timezone->valuestring);
-                    }
-                    
-                    cJSON *utc_offset = cJSON_GetObjectItemCaseSensitive(root, "utc_offset");
-                    if (cJSON_IsString(utc_offset)) {
-                        ESP_LOGI(HTTP_TAG, "⏰ Offset UTC: %s", utc_offset->valuestring);
-                    }
-                    
-                    cJSON_Delete(root);
-                } else {
-                    ESP_LOGE(HTTP_TAG, "❌ Error al parsear JSON: %s", cJSON_GetErrorPtr());
-                }
-                
-                free(output_buffer);
-                output_buffer = NULL;
-                output_len = 0;
-            }
-            break;
-        case HTTP_EVENT_DISCONNECTED:
-            ESP_LOGW(HTTP_TAG, "🔌 HTTP_EVENT_DISCONNECTED - Desconectado del servidor");
-            if (output_buffer != NULL) {
-                free(output_buffer);
-                output_buffer = NULL;
-                output_len = 0;
-            }
-            break;
-        case HTTP_EVENT_REDIRECT:
-            ESP_LOGI(HTTP_TAG, "🔄 HTTP_EVENT_REDIRECT - Redirigiendo");
+        default:
+            printf("Error: Use it like: [Led]val|val\r\n");
             break;
     }
-    return ESP_OK;
-}
 
-// Función para hacer la petición HTTP y obtener la fecha - MÁS VERBOSE
-void fetch_and_print_date(void) {
-    ESP_LOGI(HTTP_TAG, "🚀 Iniciando petición HTTP...");
-    
-    // Verificar estado de la conexión
-    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    if (netif == NULL) {
-        ESP_LOGE(HTTP_TAG, "❌ No se pudo obtener la interfaz de red");
-        return;
-    }
-    
-    esp_netif_ip_info_t ip_info;
-    if (esp_netif_get_ip_info(netif, &ip_info) == ESP_OK) {
-        ESP_LOGI(HTTP_TAG, "📡 IP actual: " IPSTR, IP2STR(&ip_info.ip));
-        ESP_LOGI(HTTP_TAG, "🌐 Gateway: " IPSTR, IP2STR(&ip_info.gw));
-    } else {
-        ESP_LOGE(HTTP_TAG, "❌ No se pudo obtener información de IP");
-    }
-    
-    // Configuración HTTP más detallada
-    esp_http_client_config_t config = {
-        .url = "http://worldtimeapi.org/api/timezone/America/Bogota",
-        .event_handler = _http_event_handler,
-        .user_data = NULL,
-        .disable_auto_redirect = false,
-        .skip_cert_common_name_check = true,
-        .use_global_ca_store = false,
-        .timeout_ms = 10000,  // 10 segundos de timeout
-        .buffer_size = 512,   // Buffer size para HTTP
-        .buffer_size_tx = 1024, // Buffer size para transmisión
-    };
-    
-    ESP_LOGI(HTTP_TAG, "🔧 Configuración del cliente HTTP:");
-    ESP_LOGI(HTTP_TAG, "   URL: %s", config.url);
-    ESP_LOGI(HTTP_TAG, "   Timeout: %d ms", config.timeout_ms);
-    ESP_LOGI(HTTP_TAG, "   Buffer size: %d bytes", config.buffer_size);
-    
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (client == NULL) {
-        ESP_LOGE(HTTP_TAG, "❌ Fallo al inicializar cliente HTTP");
-        return;
-    }
-    
-    ESP_LOGI(HTTP_TAG, "✅ Cliente HTTP inicializado correctamente");
-    ESP_LOGI(HTTP_TAG, "📤 Haciendo petición GET a %s", config.url);
-    
-    esp_err_t err = esp_http_client_perform(client);
-    
-    if (err == ESP_OK) {
-        int status_code = esp_http_client_get_status_code(client);
-        int64_t content_length = esp_http_client_get_content_length(client);
-        
-        ESP_LOGI(HTTP_TAG, "✅ Petición HTTP completada exitosamente");
-        ESP_LOGI(HTTP_TAG, "📊 Código de estado HTTP: %d", status_code);
-        ESP_LOGI(HTTP_TAG, "📏 Content-Length: %lld bytes", content_length);
-        
-        if (status_code >= 200 && status_code < 300) {
-            ESP_LOGI(HTTP_TAG, "✅ Respuesta HTTP exitosa");
-        } else if (status_code >= 300 && status_code < 400) {
-            ESP_LOGW(HTTP_TAG, "⚠️ Redirección HTTP: %d", status_code);
-        } else if (status_code >= 400 && status_code < 500) {
-            ESP_LOGE(HTTP_TAG, "❌ Error del cliente HTTP: %d", status_code);
-        } else if (status_code >= 500) {
-            ESP_LOGE(HTTP_TAG, "❌ Error del servidor HTTP: %d", status_code);
+    /** VERBOSE
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 2; j++) {
+
+            switch(i) {
+                case 0:
+                    printf("R-");
+                    break;
+                case 1:
+                    printf("G-");
+                    break;
+                case 2:
+                    printf("B-");
+                    break;
+            }
+            switch(j) {
+                case 0:
+                    printf("min:");
+                    break;
+                case 1:
+                    printf("max:");
+                    break;
+            }
+            printf(" %.1f\r\n", temp_levels[i][j]);
         }
+    }*/
+}
+
+static void configure_blink_led(void)
+{
+    gpio_reset_pin(BLINK_GPIO);
+    /* Set the GPIO as a push/pull output */
+    gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);
+	
+}
+
+double temperature;
+void ntc_task(void *arg) {
+    
+    adc_type_data_t ntc_item;
+    ntc_item.type = NTC_DATA_TYPE;
+    ntc_item.value = 0;
+
+    const float beta = 3950.0;
+    const float R0 = 10000.0;
+    const float T0 = 298.15; // 25°C in Kelvin
+    const float R2 = 1000.0; // Resistor in voltage divider
+
+    const float Vi = 4.8; // Input voltage to the voltage divider
+    float Vo = 0;
+    float Rt = 0;
+    float T = 0; // Temperature in Kelvin
+    float final_T = 0; // Temperature in Celsius
+
+    // 1. Configure ADC
+    set_adc(&ntc_adc_conf, &ntc_adc_handle);
+
+    int raw_val = 0;
+    int voltage_mv = 0;
+
+    while (1) {
         
-    } else {
-        ESP_LOGE(HTTP_TAG, "❌ Error al realizar la petición HTTP GET: %s (0x%x)", 
-                 esp_err_to_name(err), err);
+        xSemaphoreTake(xMutex, portMAX_DELAY); // Acquire mutex for ADC
+        get_raw_data(ntc_adc_handle, &raw_val);
+        raw_to_voltage(ntc_adc_handle, raw_val, &voltage_mv);
+
+        Vo = (float)voltage_mv / 1000.0f; // Convert mV to Volts
+
+        // Original formula for Rt
+        Rt = (R2 * (Vi + Vo)) / Vo;
+
+        // Original formula for T
+        T = (beta * T0) / (logf(Rt / R0) * T0 + beta);
+        final_T = T - 273.15f; // Convert Kelvin to Celsius
+
+        temperature = final_T; //Send to http as global var
         
-        // Detalles adicionales del error
-        switch (err) {
-            case ESP_ERR_INVALID_ARG:
-                ESP_LOGE(HTTP_TAG, "   Argumento inválido");
+        //VERBOSE
+        printf("T: %.2f °C\r\n", final_T);
+        ntc_item.value = final_T;
+        xQueueSend(adc_data_queue, &ntc_item, (TickType_t)pdMS_TO_TICKS(10)); // Send the full struct
+        xSemaphoreGive(xMutex); // Release mutex
+
+        
+        vTaskDelay(pdMS_TO_TICKS(500)); // Delay for 100ms
+    }
+}
+
+void pot_task(void *arg) {
+    
+    adc_type_data_t pot_item;
+    pot_item.type = POT_DATA_TYPE;
+    pot_item.value = 0;
+
+    // 1. Configure ADC
+    set_adc(&pot_adc_conf, &pot_adc_handle);
+
+    int raw_val = 0;
+    int voltage_mv_pot = 0;
+    float Vo_pot = 0; // Voltage from potentiometer
+
+    while (1) {
+
+        xSemaphoreTake(xMutex, portMAX_DELAY); // Acquire mutex for ADC
+        // 2. Get Raw Data
+        get_raw_data(pot_adc_handle, &raw_val);
+
+        // 3. Convert to Voltage
+        raw_to_voltage(pot_adc_handle, raw_val, &voltage_mv_pot);
+
+        Vo_pot = (float)voltage_mv_pot / 1000.0f; // Convert mV to Volts
+
+
+        //VERBOSE
+        printf("P: %.2fV\r\n", Vo_pot);
+        pot_item.value = Vo_pot;
+
+        xQueueSend(adc_data_queue, &pot_item, (TickType_t)pdMS_TO_TICKS(10)); // Send the full struct
+        xSemaphoreGive(xMutex); // Release mutex
+        
+        vTaskDelay(pdMS_TO_TICKS(450)); // Delay for 30ms
+    }
+}
+
+void rgb_pwm_task(void *pvParameters) {
+	rgb_values_t rgb_values;
+
+    rgb_pwm_set_color(&led_rgb_duty, &timer, 0, 0, 75, IS_RGB_COMMON_ANODE);
+
+	while (1) {
+		if(xQueueReceive(rgb_event_queue, &rgb_values, (TickType_t)pdMS_TO_TICKS(10))) {
+			printf("Queue Received RGB values: Red=%d, Green=%d, Blue=%d\n", rgb_values.red_val, rgb_values.green_val, rgb_values.blue_val);
+
+            rgb_pwm_set_color(&led_rgb_duty, &timer, rgb_values.red_val, rgb_values.green_val, rgb_values.blue_val, IS_RGB_COMMON_ANODE);
+
+		}
+        vTaskDelay(pdMS_TO_TICKS(10));
+	}
+}
+
+void rgb_temp_task(void *pvParameters) {    
+
+    led_color_state_t current_led_state = LED_STATE_NONE; // Initial state
+    patron_temp_t current_uart_patron;
+
+    float current_ntc_temp = 0.0f;
+    uint8_t raw_brightness_percent = 0;
+
+    rgb_pwm_set_color(&led_rgb_temp, &timer, 0, 0, 75, IS_RGB_COMMON_ANODE);
+
+    while (1) {
+        // UPDATE UART TEMP THRESHOLDS
+        if(xQueueReceive(temp_uart_queue, &current_uart_patron, (TickType_t)pdMS_TO_TICKS(10))) {
+            fill_temp_levels(current_uart_patron);
+        }     
+        
+        led_color_state_t new_led_state = LED_STATE_NONE; // Default to none
+
+        // Determine new LED state based on temperature
+        // Using exclusive ranges to avoid overlap issues
+        if (current_ntc_temp < temp_levels[2][1]) { // BLUE: Below upper limit of blue range (e.g., <20)
+            new_led_state = LED_STATE_BLUE;
+        } else if (current_ntc_temp >= temp_levels[1][0] && current_ntc_temp < temp_levels[1][1]) { // GREEN: Within green range (e.g., >=20 and <40)
+            new_led_state = LED_STATE_GREEN;
+        } else if (current_ntc_temp >= temp_levels[0][0] && current_ntc_temp <= temp_levels[0][1]) { // RED: Within red range (e.g., >=40 and <=80)
+            new_led_state = LED_STATE_RED;
+        } else {
+            // Temperature is outside all defined ranges
+            new_led_state = LED_STATE_NONE; // All LEDs off
+            printf("Temperature %.2f °C is out of defined LED ranges. LEDs off.\r\n", current_ntc_temp);
+        }
+
+        current_led_state = new_led_state; // Update the current state
+
+        switch (current_led_state) {
+            case LED_STATE_BLUE:
+                rgb_pwm_set_color(&led_rgb_temp, &timer, 0, 0, raw_brightness_percent, IS_RGB_COMMON_ANODE); // R & G off (0% brightness), B adjusted
                 break;
-            case ESP_ERR_INVALID_STATE:
-                ESP_LOGE(HTTP_TAG, "   Estado inválido");
+            case LED_STATE_GREEN:
+                rgb_pwm_set_color(&led_rgb_temp, &timer, 0, raw_brightness_percent, 0, IS_RGB_COMMON_ANODE); // R & B off (0% brightness), G adjusted
                 break;
-            case ESP_ERR_NO_MEM:
-                ESP_LOGE(HTTP_TAG, "   Sin memoria disponible");
+            case LED_STATE_RED:
+                rgb_pwm_set_color(&led_rgb_temp, &timer, raw_brightness_percent, 0, 0, IS_RGB_COMMON_ANODE); // G & B off (0% brightness), R adjusted
                 break;
-            case ESP_ERR_TIMEOUT:
-                ESP_LOGE(HTTP_TAG, "   Timeout de conexión");
-                break;
-            case ESP_FAIL:
-                ESP_LOGE(HTTP_TAG, "   Fallo general");
+            case LED_STATE_NONE:
                 break;
             default:
-                ESP_LOGE(HTTP_TAG, "   Error desconocido: 0x%x", err);
+                rgb_pwm_set_color(&led_rgb_temp, &timer, 0, 0, 0, IS_RGB_COMMON_ANODE); // All off (0% brightness)
                 break;
         }
+        vTaskDelay(pdMS_TO_TICKS(50)); // Small delay for the state machine
+
+
     }
     
-    ESP_LOGI(HTTP_TAG, "🧹 Limpiando cliente HTTP");
-    esp_http_client_cleanup(client);
-    ESP_LOGI(HTTP_TAG, "✅ Cliente HTTP limpiado");
 }
 
-void app_main(void) {
-    ESP_LOGI(TAG, "🚀 Iniciando aplicación ESP32 HTTP Client");
-    
-    // Configurar niveles de log para máximo detalle
-    esp_log_level_set("*", ESP_LOG_INFO);
-    esp_log_level_set("HTTP_CLIENT", ESP_LOG_DEBUG);
-    esp_log_level_set("TRANSPORT_BASE", ESP_LOG_DEBUG);
-    esp_log_level_set("esp-tls", ESP_LOG_DEBUG);
-    esp_log_level_set("WIFI_STATION", ESP_LOG_DEBUG);
-    
-    ESP_LOGI(TAG, "🔧 Configuración de logs establecida");
-    
-    // 1. Inicializar NVS (Non-Volatile Storage)
-    ESP_LOGI(TAG, "📂 Inicializando NVS...");
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "⚠️ NVS necesita ser borrado, reinicializando...");
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
-    ESP_LOGI(TAG, "✅ NVS inicializado correctamente");
-
-    // 2. Inicializar TCP/IP Stack
-    ESP_LOGI(TAG, "🌐 Inicializando stack TCP/IP...");
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_LOGI(TAG, "✅ Stack TCP/IP inicializado");
-
-    // 3. Crear el loop de eventos por defecto
-    ESP_LOGI(TAG, "🔄 Creando loop de eventos...");
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    ESP_LOGI(TAG, "✅ Loop de eventos creado");
-
-    // 4. Crear una instancia de netif para Wi-Fi estación
-    ESP_LOGI(TAG, "📡 Creando interfaz de red Wi-Fi...");
-    esp_netif_create_default_wifi_sta();
-    ESP_LOGI(TAG, "✅ Interfaz de red Wi-Fi creada");
-
-    // 5. Inicializar Wi-Fi
-    ESP_LOGI(TAG, "📶 Inicializando Wi-Fi...");
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_LOGI(TAG, "✅ Wi-Fi inicializado");
-
-    // 6. Registrar el handler de eventos
-    ESP_LOGI(TAG, "📋 Registrando handlers de eventos...");
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &event_handler,
-                                                        NULL,
-                                                        NULL));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &event_handler,
-                                                        NULL,
-                                                        NULL));
-    ESP_LOGI(TAG, "✅ Handlers de eventos registrados");
-
-    // 7. Configurar Wi-Fi en modo estación
-    ESP_LOGI(TAG, "⚙️ Configurando Wi-Fi en modo estación...");
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = "Javastral",
-            .password = "damedane",
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-            .sae_pwe_h2e = WPA3_SAE_PWE_BOTH,
-        },
+// Read UART task
+void uart_rx_task(void *arg) {
+    //Config UART
+    uart_config_t uart_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity    = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_APB,
     };
-    
-    ESP_LOGI(TAG, "📋 Configuración Wi-Fi:");
-    ESP_LOGI(TAG, "   SSID: %s", (char*)wifi_config.sta.ssid);
-    ESP_LOGI(TAG, "   Modo de autenticación: WPA2_PSK");
-    
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    ESP_LOGI(TAG, "✅ Wi-Fi configurado en modo estación");
+    uart_param_config(UART_NUM, &uart_config);
+    uart_set_pin(UART_NUM, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    uart_driver_install(UART_NUM, RD_BUF_SIZE * 2, BUF_SIZE * 2, 20, &uart_rx_queue, 0);
 
-    // 8. Iniciar Wi-Fi
-    ESP_LOGI(TAG, "🚀 Iniciando Wi-Fi...");
-    ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_LOGI(TAG, "✅ Wi-Fi en modo estación iniciado");
+    printf("UART initialized.\r\n");
 
-    // Esperar a que el Wi-Fi esté conectado antes de intentar hacer la petición HTTP
-    ESP_LOGI(TAG, "⏳ Esperando conexión Wi-Fi...");
-    int retry_count = 0;
-    while (!s_wifi_connected && retry_count < 20) {
-        ESP_LOGI(TAG, "🔄 Esperando conexión Wi-Fi... (%d/20)", retry_count + 1);
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        retry_count++;
-    }
-
-    if (s_wifi_connected) {
-        ESP_LOGI(TAG, "✅ Wi-Fi conectado exitosamente. Iniciando petición HTTP...");
-        fetch_and_print_date();
-    } else {
-        ESP_LOGE(TAG, "❌ No se pudo conectar al Wi-Fi después de 20 intentos. No se realizará la petición HTTP.");
-    }
-
-    // La aplicación principal continuará ejecutándose aquí
-    ESP_LOGI(TAG, "🔄 Entrando en loop principal...");
-    while (true) {
-        ESP_LOGI(TAG, "💤 Esperando 1 segundos antes de la próxima petición...");
-        vTaskDelay(pdMS_TO_TICKS(1000));
+    uart_event_t event;
+    while(1) {
+        //wait UART RX
+        if(xQueueReceive(uart_rx_queue, (void * )&event, (TickType_t)pdMS_TO_TICKS(10))) {
         
-        if (s_wifi_connected) {
-            ESP_LOGI(TAG, "🔄 Realizando petición HTTP periódica...");
-            fetch_and_print_date();
-        } else {
-            ESP_LOGW(TAG, "⚠️ Wi-Fi desconectado, omitiendo petición HTTP");
+            uart_read_bytes(UART_NUM, uart_rx_buffer, event.size, portMAX_DELAY);
+            uart_rx_buffer[event.size] = '\0';
+
+            char *str_buffer = (char *)uart_rx_buffer;
+
+			patron_temp_t received_patron = patron_level_temp(str_buffer);
+			xQueueSend(temp_uart_queue, &received_patron, (TickType_t)pdMS_TO_TICKS(10));
+            
         }
     }
 }
+
+void app_main(void)
+{
+
+    //MUTEX
+    xMutex = xSemaphoreCreateMutex();
+    printf("Mutex created successfully.\r\n");
+
+    //PWM
+    pwm_timer_init(&timer);
+    printf("Timer Initialized. \r\n");
+
+    rgb_pwm_init(&led_rgb_temp, &timer); // Set IOs for PWM
+    printf("PWM rgb_temp Initialized. \r\n");
+
+
+    rgb_pwm_init(&led_rgb_duty, &timer); // Set IOs for PWM
+    printf("PWM rgb_duty Initialized. \r\n");
+
+    //ADC
+    
+
+	rgb_event_queue = xQueueCreate(3, sizeof(rgb_values_t));
+	temp_uart_queue = xQueueCreate(3, 2048);
+    uart_status_queue = xQueueCreate(1, sizeof(bool));
+    adc_data_queue = xQueueCreate(10, sizeof(adc_type_data_t));
+
+
+    // Initialize NVS
+	esp_err_t ret = nvs_flash_init();
+	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+	{
+		ESP_ERROR_CHECK(nvs_flash_erase());
+		ret = nvs_flash_init();
+	}
+	ESP_ERROR_CHECK(ret);
+	
+	configure_blink_led();
+	// Start Wifi
+	wifi_app_start();
+
+	xTaskCreate(rgb_pwm_task, "rgb_pwm_task", 2048, NULL, 5, NULL);
+    xTaskCreate(rgb_temp_task, "rgb_temp_task", 2048, NULL, 5, NULL);
+    xTaskCreate(uart_rx_task, "uart_rx_task", 2048, NULL, 5, NULL);
+    xTaskCreate(ntc_task, "ntc_task", 4096, NULL, 4, NULL);
+    xTaskCreate(pot_task, "pot_task", 4096, NULL, 4, NULL);
+
+}
+
