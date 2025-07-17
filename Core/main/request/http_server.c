@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
+#include "freertos/idf_additions.h"
 #include "sys/param.h"
 #include "driver/gpio.h"
 
@@ -255,6 +256,7 @@ static esp_err_t http_server_favicon_ico_handler(httpd_req_t *req)
 extern double temperature;
 static esp_err_t http_server_get_ntc_sensor_readings_json_handler(httpd_req_t *req)
 {
+	
 	ESP_LOGI(TAG, "/ntcSensor.json requested");
 
 	cJSON *root;

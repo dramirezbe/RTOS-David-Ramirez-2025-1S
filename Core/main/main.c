@@ -35,17 +35,16 @@
 #define RD_IO          GPIO_NUM_27
 #define GD_IO          GPIO_NUM_26
 #define BD_IO          GPIO_NUM_25
-#define LED_FREQUENCY 1000
 
 //-------------------RGB TEMP-----------------------
 #define RT_CHANNEL     LEDC_CHANNEL_3
 #define GT_CHANNEL     LEDC_CHANNEL_4
 #define BT_CHANNEL     LEDC_CHANNEL_5
-#define RT_IO          GPIO_NUM_5
-#define GT_IO          GPIO_NUM_18
-#define BT_IO          GPIO_NUM_19
-#define LED_FREQUENCY 1000
+#define RT_IO          GPIO_NUM_13
+#define GT_IO          GPIO_NUM_12
+#define BT_IO          GPIO_NUM_14
 
+#define LED_FREQUENCY 1000
 #define IS_RGB_COMMON_ANODE false //both
 
 
@@ -138,12 +137,17 @@ patron_temp_t patron_level_temp(char *data) {
            &result_patron.temp_sup);
 
     //VERBOSE
-    //printf("Parsed: Color=%c, Temp Inf=%.1f, Temp Sup=%.1f\r\n", result_patron.color, result_patron.temp_inf, result_patron.temp_sup);
+    printf("Parsed: Color=%c, Temp Inf=%.1f, Temp Sup=%.1f\r\n", result_patron.color, result_patron.temp_inf, result_patron.temp_sup);
     return result_patron;
 }
 
 // Change global array
-float temp_levels[3][2];
+float temp_levels[3][2] = {
+    {40.0, 80.0}, // Default for Red (assuming >40)
+    {20.0, 40.0}, // Default for Green (assuming 20-40)
+    {0.0, 20.0}   // Default for Blue (assuming <20)
+};
+
 void fill_temp_levels(patron_temp_t patron) {
     switch(patron.color){
         case 'R':
@@ -166,7 +170,8 @@ void fill_temp_levels(patron_temp_t patron) {
             break;
     }
 
-    /** VERBOSE
+    //VERBOSE
+
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < 2; j++) {
 
@@ -191,7 +196,7 @@ void fill_temp_levels(patron_temp_t patron) {
             }
             printf(" %.1f\r\n", temp_levels[i][j]);
         }
-    }*/
+    }
 }
 
 static void configure_blink_led(void)
@@ -244,7 +249,7 @@ void ntc_task(void *arg) {
         temperature = final_T; //Send to http as global var
         
         //VERBOSE
-        printf("T: %.2f °C\r\n", final_T);
+        //printf("T: %.2f °C\r\n", final_T);
         ntc_item.value = final_T;
         xQueueSend(adc_data_queue, &ntc_item, (TickType_t)pdMS_TO_TICKS(10)); // Send the full struct
         xSemaphoreGive(xMutex); // Release mutex
@@ -280,7 +285,7 @@ void pot_task(void *arg) {
 
 
         //VERBOSE
-        printf("P: %.2fV\r\n", Vo_pot);
+        //printf("P: %.2fV\r\n", Vo_pot);
         pot_item.value = Vo_pot;
 
         xQueueSend(adc_data_queue, &pot_item, (TickType_t)pdMS_TO_TICKS(10)); // Send the full struct
@@ -310,54 +315,88 @@ void rgb_temp_task(void *pvParameters) {
 
     led_color_state_t current_led_state = LED_STATE_NONE; // Initial state
     patron_temp_t current_uart_patron;
+    adc_type_data_t received_item;
 
     float current_ntc_temp = 0.0f;
-    uint8_t raw_brightness_percent = 0;
+    float current_pot_voltage = 0.0f;
+    uint8_t raw_brightness_percent = 100;
 
     rgb_pwm_set_color(&led_rgb_temp, &timer, 0, 0, 75, IS_RGB_COMMON_ANODE);
 
     while (1) {
+
+        //VERBOSE
+        //printf("Thresholds: %.1f, %.1f, %.1f, %.1f, %.1f, %.1f\r\n", temp_levels[0][0], temp_levels[0][1], temp_levels[1][0], temp_levels[1][1], temp_levels[2][0], temp_levels[2][1]);
+        
         // UPDATE UART TEMP THRESHOLDS
         if(xQueueReceive(temp_uart_queue, &current_uart_patron, (TickType_t)pdMS_TO_TICKS(10))) {
             fill_temp_levels(current_uart_patron);
-        }     
+        }  
+        
+        if(xQueueReceive(adc_data_queue, &received_item, (TickType_t)pdMS_TO_TICKS(10))) {
+            if(received_item.type == NTC_DATA_TYPE) {
+
+                //current_ntc_temp = received_item.value;
+    
+                //VERBOSE
+                //printf("Current Temp: %.2f °C\r\n", current_temperature);
+            } else if(received_item.type == POT_DATA_TYPE) {
+    
+                current_pot_voltage = received_item.value;
+                // Map potentiometer voltage (0-3.3V) to 0-100% brightness
+                raw_brightness_percent = (uint8_t)((current_pot_voltage / 3.3) * 100.0f); 
+                // Clamp brightness to 0-100%
+                if (raw_brightness_percent > 100) raw_brightness_percent = 100;
+    
+                //VERBOSE
+                //printf("Pot Voltage: %.2fV, Brightness: %d%%\r\n", current_pot_voltage, raw_brightness_percent);
+            }
+        }
         
         led_color_state_t new_led_state = LED_STATE_NONE; // Default to none
-
+        current_ntc_temp = temperature;
         // Determine new LED state based on temperature
-        // Using exclusive ranges to avoid overlap issues
-        if (current_ntc_temp < temp_levels[2][1]) { // BLUE: Below upper limit of blue range (e.g., <20)
+        // Check each color range using proper min/max thresholds
+
+        //VERBOSE
+        //printf("Current NTC temp: %.2f °C\r\n", current_ntc_temp);
+
+        if (current_ntc_temp >= temp_levels[2][0] && current_ntc_temp <= temp_levels[2][1]) { // BLUE: Within blue range
             new_led_state = LED_STATE_BLUE;
-        } else if (current_ntc_temp >= temp_levels[1][0] && current_ntc_temp < temp_levels[1][1]) { // GREEN: Within green range (e.g., >=20 and <40)
+        } else if (current_ntc_temp >= temp_levels[1][0] && current_ntc_temp <= temp_levels[1][1]) { // GREEN: Within green range
             new_led_state = LED_STATE_GREEN;
-        } else if (current_ntc_temp >= temp_levels[0][0] && current_ntc_temp <= temp_levels[0][1]) { // RED: Within red range (e.g., >=40 and <=80)
+        } else if (current_ntc_temp >= temp_levels[0][0] && current_ntc_temp <= temp_levels[0][1]) { // RED: Within red range
             new_led_state = LED_STATE_RED;
         } else {
             // Temperature is outside all defined ranges
             new_led_state = LED_STATE_NONE; // All LEDs off
             printf("Temperature %.2f °C is out of defined LED ranges. LEDs off.\r\n", current_ntc_temp);
         }
+        //printf("New LED state: %d\r\n", new_led_state);
 
         current_led_state = new_led_state; // Update the current state
 
         switch (current_led_state) {
             case LED_STATE_BLUE:
                 rgb_pwm_set_color(&led_rgb_temp, &timer, 0, 0, raw_brightness_percent, IS_RGB_COMMON_ANODE); // R & G off (0% brightness), B adjusted
+                //pwm_set_duty(&led_rgb_temp.blue, &timer, raw_brightness_percent);
                 break;
             case LED_STATE_GREEN:
                 rgb_pwm_set_color(&led_rgb_temp, &timer, 0, raw_brightness_percent, 0, IS_RGB_COMMON_ANODE); // R & B off (0% brightness), G adjusted
+                //pwm_set_duty(&led_rgb_temp.green, &timer, raw_brightness_percent);
                 break;
             case LED_STATE_RED:
                 rgb_pwm_set_color(&led_rgb_temp, &timer, raw_brightness_percent, 0, 0, IS_RGB_COMMON_ANODE); // G & B off (0% brightness), R adjusted
+                //pwm_set_duty(&led_rgb_temp.red, &timer, raw_brightness_percent);
                 break;
             case LED_STATE_NONE:
                 break;
             default:
                 rgb_pwm_set_color(&led_rgb_temp, &timer, 0, 0, 0, IS_RGB_COMMON_ANODE); // All off (0% brightness)
                 break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(50)); // Small delay for the state machine
+        }        
 
+        vTaskDelay(pdMS_TO_TICKS(50)); // Small delay for the state machine
 
     }
     
