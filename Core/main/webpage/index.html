@@ -1,60 +1,87 @@
 <!DOCTYPE html>
-<html lang="en">
-    <head>
-        <meta charset="utf-8"/>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-        <meta name="apple-mobile-web-app-capable" content="yes" />
-        <script src='jquery-3.3.1.min.js'></script>
-        <link rel="stylesheet" href="app.css">
-        <script src="app.js"></script> <title>ESP32 JAVASTRAL</title>
-    </head>
-    <body>
-    <header>
-        <h1>ESP32 Javastral</h1>
-    </header>
-    
-    <div id="NTCSensor">
-        <h2>Temperature Reading NTC Sensor</h2>
-        <label for="temperature_reading">Temperature: </label>
-        <div id="temperature_reading"></div> 
-    </div>
-        
-    <div id="WiFiConnect">
-        <h2>ESP32 Interaction</h2>
-        <h3>RGB Handle Color</h3>
-        <section>
-            <input id="red_val" type="number" step="1" placeholder="Red">
-            <input id="green_val" type="number" step="1" placeholder="Green">
-            <input id="blue_val" type="number" step="1" placeholder="Blue">
-        </section>
-        <h3>Handle Temp Threshold</h3>
-        <section class="temp_threshold">
-            <div class="color-group">
-                <h4>Red Thresholds</h4>
-                <input id="red_min" type="number" step="1" placeholder="Min Red">
-                <input id="red_max" type="number" step="1" placeholder="Max Red">
-            </div>
-            <div class="color-group">
-                <h4>Green Thresholds</h4>
-                <input id="green_min" type="number" step="1" placeholder="Min Green">
-                <input id="green_max" type="number" step="1" placeholder="Max Green">
-            </div>
-            <div class="color-group">
-                <h4>Blue Thresholds</h4>
-                <input id="blue_min" type="number" step="1" placeholder="Min Blue">
-                <input id="blue_max" type="number" step="1" placeholder="Max Blue">
-            </div>
-        </section>
+<html>
+<head>
+    <title>ESP32 Automatic Window Control</title>
+    <link rel="stylesheet" href="app.css">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body>
 
-        <div class="buttons">
-            <input id="send_rgb" type="button" value="Send Color" />
-            <input id="send_temp_threshold" type="button" value="Send Temp Threshold"/>
-            <input id="toogle_led" type="button" value="Toggle Board LED" />
-            <input id="apagar_uart" type="button" value="UART On" />
+    <div class="container">
+        <div class="header">
+            <h1>ESP32 Ambient Automatic Window Control</h1>
+            <div class="status-indicator online">Online</div>
         </div>
-        <div id="wifi_connect_credentials_errors"></div>
-        <h4 id="wifi_connect_status"></h4>
+
+        <div class="section-block">
+            <h2>Hour Section</h2>
+            <div class="data-grid">
+                <div class="data-item">
+                    <span class="label">Current Hour:</span>
+                    <span class="value" id="currentHour">--:--:--</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="section-block">
+            <h2>Control Settings</h2>
+            <div class="data-grid">
+                <div class="data-item">
+                    <span class="label">Control Mode:</span>
+                    <span class="value" id="currentMode">Potentiometer (Manual)</span>
+                </div>
+                <div class="button-group"> <button id="modePotentiometer">Potentiometer (Manual)</button>
+                    <button id="modeTempThreshold">Temp Threshold</button>
+                    <button id="modeRegisters">Registers (Do Nothing Yet)</button>
+                </div>
+            </div>
+            <hr>
+            <div class="data-grid">
+                <div class="data-item">
+                    <span class="label">Window Open:</span>
+                    <span class="value" id="windowOpenPercentage">--</span> %
+                </div>
+            </div>
+            <p class="note">Adjusted physically via potentiometer.</p>
+            <hr>
+            <h3>Temp Range for Fully Open Window</h3>
+            <div class="data-grid">
+                <div class="data-item">
+                    <span class="label">Min Temp (°C):</span>
+                    <input type="number" id="tempFullyOpenMin" value="18">
+                </div>
+                <div class="data-item">
+                    <span class="label">Max Temp (°C):</span>
+                    <input type="number" id="tempFullyOpenMax" value="22">
+                </div>
+            </div>
+            <p class="note">Window fully open when Min &le; Temp &le; Max.</p>
+        </div>
+
+        <div class="section-block">
+            <h2>Sensor Data</h2>
+            <div class="data-grid">
+                <div class="data-item">
+                    <span class="label">Ambient Temp:</span>
+                    <span class="value" id="ambientTemp">--</span> °C
+                </div>
+                <div class="data-item">
+                    <span class="label">Light Resistance:</span>
+                    <span class="value" id="lightResistance">--</span> Ohms
+                </div>
+                <div class="data-item">
+                    <span class="label">Day State:</span>
+                    <span class="value" id="dayState">--</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>&copy; 2025 ESP32 Window Control Interface</p>
+        </div>
     </div>
-        
-    </body>
+
+    <script src="jquery-3.3.1.min.js"></script>
+    <script src="app.js"></script>
+</body>
 </html>

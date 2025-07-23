@@ -1,4 +1,3 @@
-
 /**
  * @file io_utils.c
  * @author David Ramírez Betancourth
@@ -6,6 +5,7 @@
  */
 
 #include "io_utils.h"
+#include "esp_log.h" // Still needed for ESP_ERROR_CHECK internally
 
 void io_config(gpio_num_t io_num,
                          bool       is_input,

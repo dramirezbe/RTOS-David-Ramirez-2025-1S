@@ -6,7 +6,6 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
-#include "freertos/idf_additions.h"
 #include "sys/param.h"
 #include "driver/gpio.h"
 
@@ -30,11 +29,6 @@ static TaskHandle_t task_http_server_monitor = NULL;
 // Queue handle used to manipulate the main queue of events
 static QueueHandle_t http_server_monitor_queue_handle;
 
-static uint8_t s_led_state = 0;
-
-
-
-
 // Embedded files: JQuery, index.html, app.css, app.js and favicon.ico files
 extern const uint8_t jquery_3_3_1_min_js_start[]	asm("_binary_jquery_3_3_1_min_js_start");
 extern const uint8_t jquery_3_3_1_min_js_end[]		asm("_binary_jquery_3_3_1_min_js_end");
@@ -46,7 +40,6 @@ extern const uint8_t app_js_start[]					asm("_binary_app_js_start");
 extern const uint8_t app_js_end[]					asm("_binary_app_js_end");
 extern const uint8_t favicon_ico_start[]			asm("_binary_favicon_ico_start");
 extern const uint8_t favicon_ico_end[]				asm("_binary_favicon_ico_end");
-
 
 //-----------------------------------UTILS----------------------------
 /**
@@ -247,34 +240,27 @@ static esp_err_t http_server_favicon_ico_handler(httpd_req_t *req)
 	return ESP_OK;
 }
 
-/**
- * NTC sensor readings JSON handler responds with NTC sensor data
- * @param req HTTP request for which the uri needs to be handled
- * @return ESP_OK
- */
-
-extern double temperature;
-static esp_err_t http_server_get_ntc_sensor_readings_json_handler(httpd_req_t *req)
+extern QueueHandle_t http_send_lm35_queue;
+static esp_err_t http_server_get_lm35_sensor_readings_json_handler(httpd_req_t *req)
 {
-	
-	ESP_LOGI(TAG, "/ntcSensor.json requested");
+	ESP_LOGI(TAG, "/lm35Sensor.json requested");
 
 	cJSON *root;
     char *json_string = NULL;
-    double humidity = 40.5;
+	float lm35_temp = 0.0f;
 
     root = cJSON_CreateObject();
 
-    if (cJSON_AddNumberToObject(root, "temp", temperature) == NULL) {
-        cJSON_Delete(root);
-        return ESP_FAIL;
-    }
-    if (cJSON_AddNumberToObject(root, "humidity", humidity) == NULL) {
+	xQueuePeek(http_send_lm35_queue, &lm35_temp, (TickType_t)pdMS_TO_TICKS(100));
+
+    if (cJSON_AddNumberToObject(root, "temp", lm35_temp) == NULL) {
         cJSON_Delete(root);
         return ESP_FAIL;
     }
 
     json_string = cJSON_Print(root);
+
+	printf("Requested JSON: %s\n", json_string);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json_string, strlen(json_string));
@@ -285,108 +271,42 @@ static esp_err_t http_server_get_ntc_sensor_readings_json_handler(httpd_req_t *r
     return ESP_OK;
 }
 
-static esp_err_t http_server_toogle_led_handler(httpd_req_t *req)
+extern QueueHandle_t http_send_anemo_queue;
+static esp_err_t http_server_get_anemo_readings_json_handler(httpd_req_t *req)
 {
-	ESP_LOGI(TAG, "/toogle_led.json requested");
+	ESP_LOGI(TAG, "/anemoSensor.json requested");
 
-	s_led_state = !s_led_state;
-	gpio_set_level(BLINK_GPIO, s_led_state);
+	cJSON *root;
+    char *json_string = NULL;
+	float anemo_diff = 0.0f;
 
-	// Cerrar la conexion
-    httpd_resp_set_hdr(req, "Connection", "close");
-    httpd_resp_send(req, NULL, 0);
-    
-	return ESP_OK;
-}
+    root = cJSON_CreateObject();
 
+	xQueuePeek(http_send_anemo_queue, &anemo_diff, (TickType_t)pdMS_TO_TICKS(100));
 
-extern bool uart_on;
-static esp_err_t http_server_toogle_uart_handler(httpd_req_t *req)
-{
-    ESP_LOGI(TAG, "/toogle_uart.json requested");
-
-    char *buf = NULL; 
-   
-    if (receive_http_content(req, &buf) != ESP_OK) {
+    if (cJSON_AddNumberToObject(root, "wind", anemo_diff) == NULL) {
+        cJSON_Delete(root);
         return ESP_FAIL;
     }
 
-    cJSON *root = cJSON_Parse(buf);
-    free(buf);
+    json_string = cJSON_Print(root);
 
-    if (root == NULL) {
-        const char *error_ptr = cJSON_GetErrorPtr();
-        if (error_ptr != NULL) {
-            ESP_LOGE(TAG, "Error parsing JSON before: %s", error_ptr);
-        }
-        ESP_LOGE(TAG, "Failed to parse JSON data");
-        httpd_resp_send_500(req);
-        return ESP_FAIL;
-    }
+	printf("Requested JSON: %s\n", json_string);
 
-    cJSON *uart_status = cJSON_GetObjectItemCaseSensitive(root, "uart_on");
-
-    if (cJSON_IsBool(uart_status)) {
-        if(cJSON_IsTrue(uart_status)) {
-            uart_on = true;
-            printf("UART ON parsed\n");
-        } else {
-            uart_on = false;
-            printf("UART OFF parsed\n");
-        }
-    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_string, strlen(json_string));
 
     cJSON_Delete(root);
-
-    httpd_resp_set_hdr(req, "Connection", "close");
-    httpd_resp_send(req, NULL, 0);
-
-    return ESP_OK;
-}
-extern float temp_levels[3][2];
-static esp_err_t http_server_temp_threshold_handler(httpd_req_t *req) {
-    ESP_LOGI(TAG, "/temp_threshold.json requested (POST)");
-	
-    char *buf = NULL; 
-   
-    if (receive_http_content(req, &buf) != ESP_OK) {
-        return ESP_FAIL;
-    }
-
-    cJSON *root = cJSON_Parse(buf);
-    free(buf);
-
-    float red_min = get_float_from_json(root, "red_min");
-    float red_max = get_float_from_json(root, "red_max");
-    float green_min = get_float_from_json(root, "green_min");
-    float green_max = get_float_from_json(root, "green_max");
-    float blue_min = get_float_from_json(root, "blue_min");
-    float blue_max = get_float_from_json(root, "blue_max");
-
-    printf("Values parsed: RedMin=%.2f, RedMax=%.2f, GreenMin=%.2f, GreenMax=%.2f, BlueMin=%.2f, BlueMax=%.2f",
-             red_min, red_max, green_min, green_max, blue_min, blue_max);
-
-	
-
-	temp_levels[0][0] = red_min;
-	temp_levels[0][1] = red_max;
-	temp_levels[1][0] = green_min;
-	temp_levels[1][1] = green_max;
-	temp_levels[2][0] = blue_min;
-	temp_levels[2][1] = blue_max;
-
-    cJSON_Delete(root);
-
-    httpd_resp_set_hdr(req, "Connection", "close");
-    httpd_resp_send(req, NULL, 0);
+    cJSON_free(json_string);
 
     return ESP_OK;
 }
 
-extern QueueHandle_t rgb_event_queue;
-static esp_err_t http_server_rgb_values_handler(httpd_req_t *req)
+
+extern QueueHandle_t http_receive_pwm_queue;
+static esp_err_t http_server_pwm_value_handler(httpd_req_t *req)
 {
-    ESP_LOGI(TAG, "/rgb_values.json requested (POST)");
+    ESP_LOGI(TAG, "/pwmValues.json requested (POST)");
 
 	char *buf = NULL; 
    
@@ -397,20 +317,16 @@ static esp_err_t http_server_rgb_values_handler(httpd_req_t *req)
     cJSON *root = cJSON_Parse(buf);
     free(buf);
 
-    int red_val = get_int_from_json(root, "red_val");
-    int green_val = get_int_from_json(root, "green_val");
-    int blue_val = get_int_from_json(root, "blue_val");
+    int pwm_val = get_int_from_json(root, "pwm_val");
 
-    printf("Values parsed: Red=%d, Green=%d, Blue=%d\n", red_val, green_val, blue_val);
-
-	rgb_values_t rgb_values = {.red_val = red_val, .green_val = green_val, .blue_val = blue_val};
+    printf("Pwm Value Parsed: %d\n", pwm_val);
 
     cJSON_Delete(root);
 
     httpd_resp_set_hdr(req, "Connection", "close");
     httpd_resp_send(req, NULL, 0);
 
-	xQueueSend(rgb_event_queue, &rgb_values, (TickType_t)pdMS_TO_TICKS(10));
+	xQueueSend(http_receive_pwm_queue, &pwm_val, (TickType_t)pdMS_TO_TICKS(10));
 
     return ESP_OK;
 }
@@ -505,51 +421,32 @@ static httpd_handle_t http_server_configure(void)
 		};
 		httpd_register_uri_handler(http_server_handle, &favicon_ico);
 
-		// register ntcSensor.json handler
-		httpd_uri_t ntc_sensor_json = {
-				.uri = "/ntcSensor.json",
+		// register lm35Sensor.json handler
+		httpd_uri_t lm35_sensor_json = {
+				.uri = "/lm35Sensor.json",
 				.method = HTTP_GET,
-				.handler = http_server_get_ntc_sensor_readings_json_handler,
+				.handler = http_server_get_lm35_sensor_readings_json_handler,
 				.user_ctx = NULL
 		};
-		httpd_register_uri_handler(http_server_handle, &ntc_sensor_json);
+		httpd_register_uri_handler(http_server_handle, &lm35_sensor_json);
+
+		// register anemoSensor.json handler
+		httpd_uri_t anemo_sensor_json = {
+				.uri = "/anemoSensor.json",
+				.method = HTTP_GET,
+				.handler = http_server_get_anemo_readings_json_handler,
+				.user_ctx = NULL
+		};
+		httpd_register_uri_handler(http_server_handle, &anemo_sensor_json);
 		
 		// register toogle_led handler
-		httpd_uri_t toogle_led = {
-				.uri = "/toogle_led.json",
+		httpd_uri_t pwm_values_json = {
+				.uri = "/pwmValues.json",
 				.method = HTTP_POST,
-				.handler = http_server_toogle_led_handler,
+				.handler = http_server_pwm_value_handler,
 				.user_ctx = NULL
 		};
-		httpd_register_uri_handler(http_server_handle, &toogle_led);
-		
-		//turn off UART
-		
-		httpd_uri_t toogle_uart = {
-				.uri = "/toogle_uart.json",
-				.method = HTTP_POST,
-				.handler = http_server_toogle_uart_handler,
-				.user_ctx = NULL
-		};
-		httpd_register_uri_handler(http_server_handle, &toogle_uart);
-
-		// register rgb_receiver handler
-		httpd_uri_t rgb_values = {
-				.uri = "/rgb_values.json",
-				.method = HTTP_POST,
-				.handler = http_server_rgb_values_handler,
-				.user_ctx = NULL
-		};
-		httpd_register_uri_handler(http_server_handle, &rgb_values);
-
-		// register temp_threshold handler
-		httpd_uri_t temp_threshold = {
-				.uri = "/temp_threshold.json",
-				.method = HTTP_POST,
-				.handler = http_server_temp_threshold_handler,
-				.user_ctx = NULL
-		};
-		httpd_register_uri_handler(http_server_handle, &temp_threshold);
+		httpd_register_uri_handler(http_server_handle, &pwm_values_json);
 
 		return http_server_handle;
 	}
