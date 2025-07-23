@@ -4,18 +4,14 @@
 
 #include "esp_http_server.h"
 #include "esp_log.h"
-#include "esp_ota_ops.h"
-#include "esp_timer.h"
 #include "sys/param.h"
-#include "driver/gpio.h"
 
 #include "http_server.h"
 #include "tasks_common.h"
 #include "wifi_app.h"
-//#include "rgb_led.h"
-//#include "freertos/queue.h"
 
 #include <cJSON.h>
+#include <string.h>
 
 // Tag used for ESP serial console messages
 static const char TAG[] = "http_server";
@@ -104,15 +100,15 @@ static float get_float_from_json(cJSON *json_obj, const char *key) {
     }
 }
 
-static float get_int_from_json(cJSON *json_obj, const char *key) {
-    cJSON *item = cJSON_GetObjectItemCaseSensitive(json_obj, key);
-    if (cJSON_IsNumber(item)) {
-        return (int)cJSON_GetNumberValue(item);
-    } else {
-        ESP_LOGW(TAG, "%s value not found or not a number, defaulting to 0", key);
-        return 0;
-    }
-}
+// static float get_int_from_json(cJSON *json_obj, const char *key) {
+//     cJSON *item = cJSON_GetObjectItemCaseSensitive(json_obj, key);
+//     if (cJSON_IsNumber(item)) {
+//         return (int)cJSON_GetNumberValue(item);
+//     } else {
+//         ESP_LOGW(TAG, "%s value not found or not a number, defaulting to 0", key);
+//         return 0;
+//     }
+// }
 
 //---------------------------------HTTP------------------------------------
 
@@ -240,96 +236,177 @@ static esp_err_t http_server_favicon_ico_handler(httpd_req_t *req)
 	return ESP_OK;
 }
 
-extern QueueHandle_t http_send_lm35_queue;
-static esp_err_t http_server_get_lm35_sensor_readings_json_handler(httpd_req_t *req)
+/**
+ * @brief Handler para /windowPercentage.json
+ * Envía el porcentaje de apertura actual de la ventana (leído del potenciómetro).
+ */
+static esp_err_t http_server_get_window_percentage_handler(httpd_req_t *req)
 {
-	ESP_LOGI(TAG, "/lm35Sensor.json requested");
+    float pot_percentage = 0;
+    // Espiamos la cola para obtener el último valor sin eliminarlo.
+    // Usamos un timeout corto por si la cola está momentáneamente vacía.
+    xQueuePeek(http_send_servo_pwm_queue, &pot_percentage, pdMS_TO_TICKS(10));
 
-	cJSON *root;
-    char *json_string = NULL;
-	float lm35_temp = 0.0f;
-
-    root = cJSON_CreateObject();
-
-	xQueuePeek(http_send_lm35_queue, &lm35_temp, (TickType_t)pdMS_TO_TICKS(100));
-
-    if (cJSON_AddNumberToObject(root, "temp", lm35_temp) == NULL) {
-        cJSON_Delete(root);
-        return ESP_FAIL;
-    }
-
-    json_string = cJSON_Print(root);
-
-	printf("Requested JSON: %s\n", json_string);
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "percentage", pot_percentage);
+    const char *json_string = cJSON_PrintUnformatted(root);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json_string, strlen(json_string));
 
     cJSON_Delete(root);
-    cJSON_free(json_string);
+    free((void *)json_string);
 
     return ESP_OK;
 }
 
-extern QueueHandle_t http_send_anemo_queue;
-static esp_err_t http_server_get_anemo_readings_json_handler(httpd_req_t *req)
+
+/**
+ * @brief Handler para /ambientTemp.json
+ * Envía la temperatura ambiente actual (leída del NTC).
+ */
+static esp_err_t http_server_get_ambient_temp_handler(httpd_req_t *req)
 {
-	ESP_LOGI(TAG, "/anemoSensor.json requested");
+    float ntc_temp = 0.0f;
+    xQueuePeek(http_send_ntc_queue, &ntc_temp, pdMS_TO_TICKS(10));
 
-	cJSON *root;
-    char *json_string = NULL;
-	float anemo_diff = 0.0f;
-
-    root = cJSON_CreateObject();
-
-	xQueuePeek(http_send_anemo_queue, &anemo_diff, (TickType_t)pdMS_TO_TICKS(100));
-
-    if (cJSON_AddNumberToObject(root, "wind", anemo_diff) == NULL) {
-        cJSON_Delete(root);
-        return ESP_FAIL;
-    }
-
-    json_string = cJSON_Print(root);
-
-	printf("Requested JSON: %s\n", json_string);
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "temp", ntc_temp);
+    const char *json_string = cJSON_PrintUnformatted(root);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json_string, strlen(json_string));
 
     cJSON_Delete(root);
-    cJSON_free(json_string);
+    free((void *)json_string);
 
     return ESP_OK;
 }
 
 
-extern QueueHandle_t http_receive_pwm_queue;
-static esp_err_t http_server_pwm_value_handler(httpd_req_t *req)
+/**
+ * @brief Handler para /lightSensor.json
+ * Envía la resistencia del LDR y el estado del día calculado.
+ */
+static esp_err_t http_server_get_light_sensor_handler(httpd_req_t *req)
 {
-    ESP_LOGI(TAG, "/pwmValues.json requested (POST)");
+    http_photores_data_t photores_data = {0};
+    xQueuePeek(http_send_photores_queue, &photores_data, pdMS_TO_TICKS(10));
 
-	char *buf = NULL; 
-   
+    // Convertir el enum day_state a una cadena de texto
+    const char *day_state_str;
+    switch (photores_data.day_state) {
+        case SUNNY:     day_state_str = "SUNNY"; break;
+        case CLOUDY:    day_state_str = "CLOUDY"; break;
+        case AFTERNOON: day_state_str = "AFTERNOON"; break;
+        case NIGHT:     day_state_str = "NIGHT"; break;
+        default:        day_state_str = "UNKNOWN"; break;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "resistance", photores_data.current_photores);
+    cJSON_AddStringToObject(root, "dayState", day_state_str);
+    const char *json_string = cJSON_PrintUnformatted(root);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_string, strlen(json_string));
+
+    cJSON_Delete(root);
+    free((void *)json_string);
+
+    return ESP_OK;
+}
+
+/**
+ * @brief Handler para /currentHour.json (Placeholder)
+ * Envía una hora placeholder. A implementar con un cliente NTP.
+ */
+static esp_err_t http_server_get_current_hour_handler(httpd_req_t *req)
+{
+    // TODO: Obtener la hora real de un servicio NTP.
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "hour", "18:30:05");
+    const char *json_string = cJSON_PrintUnformatted(root);
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_string, strlen(json_string));
+    
+    cJSON_Delete(root);
+    free((void *)json_string);
+
+    return ESP_OK;
+}
+
+
+/**
+ * @brief Handler para /setMode.json
+ * Recibe el nuevo modo de control del servo y lo envía a ctl_task.
+ */
+static esp_err_t http_server_set_mode_handler(httpd_req_t *req)
+{
+    char *buf = NULL;
     if (receive_http_content(req, &buf) != ESP_OK) {
         return ESP_FAIL;
     }
 
     cJSON *root = cJSON_Parse(buf);
     free(buf);
+    if (!root) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
 
-    int pwm_val = get_int_from_json(root, "pwm_val");
+    cJSON *mode_json = cJSON_GetObjectItemCaseSensitive(root, "mode");
+    if (cJSON_IsString(mode_json) && (mode_json->valuestring != NULL)) {
+        servo_ctl_mode_state_t mode_to_send = CTL_IDLE; // Default
 
-    printf("Pwm Value Parsed: %d\n", pwm_val);
-
+        if (strcmp(mode_json->valuestring, "potentiometer") == 0) {
+            mode_to_send = CTL_POT;
+        } else if (strcmp(mode_json->valuestring, "temp_threshold") == 0) {
+            mode_to_send = CTL_THRES;
+        } else if (strcmp(mode_json->valuestring, "registers") == 0) {
+            mode_to_send = CTL_REG;
+        }
+        
+        // Enviar el nuevo modo a la tarea de control
+        xQueueSend(http_receive_servo_ctl_mode, &mode_to_send, pdMS_TO_TICKS(10));
+    }
+    
     cJSON_Delete(root);
-
-    httpd_resp_set_hdr(req, "Connection", "close");
-    httpd_resp_send(req, NULL, 0);
-
-	xQueueSend(http_receive_pwm_queue, &pwm_val, (TickType_t)pdMS_TO_TICKS(10));
-
+    httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
+
+/**
+ * @brief Handler para /setTempFullyOpenRange.json
+ * Recibe los nuevos umbrales de temperatura y los envía a ctl_task.
+ */
+static esp_err_t http_server_set_temp_range_handler(httpd_req_t *req)
+{
+    char *buf = NULL;
+    if (receive_http_content(req, &buf) != ESP_OK) {
+        return ESP_FAIL;
+    }
+
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) {
+        httpd_resp_send_500(req);
+        return ESP_FAIL;
+    }
+
+    float thres_values[2] = {0.0f, 0.0f};
+    thres_values[0] = get_float_from_json(root, "minTemp");
+    thres_values[1] = get_float_from_json(root, "maxTemp");
+
+    // Enviar el array con los dos umbrales a la tarea de control
+    xQueueSend(http_receive_thres_values_queue, &thres_values, pdMS_TO_TICKS(10));
+
+    cJSON_Delete(root);
+    httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
 
 
 /**
@@ -421,32 +498,27 @@ static httpd_handle_t http_server_configure(void)
 		};
 		httpd_register_uri_handler(http_server_handle, &favicon_ico);
 
-		// register lm35Sensor.json handler
-		httpd_uri_t lm35_sensor_json = {
-				.uri = "/lm35Sensor.json",
-				.method = HTTP_GET,
-				.handler = http_server_get_lm35_sensor_readings_json_handler,
-				.user_ctx = NULL
-		};
-		httpd_register_uri_handler(http_server_handle, &lm35_sensor_json);
+		httpd_uri_t window_percentage_uri = { .uri = "/windowPercentage.json", .method = HTTP_GET, .handler = http_server_get_window_percentage_handler };
+        httpd_register_uri_handler(http_server_handle, &window_percentage_uri);
 
-		// register anemoSensor.json handler
-		httpd_uri_t anemo_sensor_json = {
-				.uri = "/anemoSensor.json",
-				.method = HTTP_GET,
-				.handler = http_server_get_anemo_readings_json_handler,
-				.user_ctx = NULL
-		};
-		httpd_register_uri_handler(http_server_handle, &anemo_sensor_json);
-		
-		// register toogle_led handler
-		httpd_uri_t pwm_values_json = {
-				.uri = "/pwmValues.json",
-				.method = HTTP_POST,
-				.handler = http_server_pwm_value_handler,
-				.user_ctx = NULL
-		};
-		httpd_register_uri_handler(http_server_handle, &pwm_values_json);
+        httpd_uri_t ambient_temp_uri = { .uri = "/ambientTemp.json", .method = HTTP_GET, .handler = http_server_get_ambient_temp_handler };
+        httpd_register_uri_handler(http_server_handle, &ambient_temp_uri);
+
+        httpd_uri_t light_sensor_uri = { .uri = "/lightSensor.json", .method = HTTP_GET, .handler = http_server_get_light_sensor_handler };
+        httpd_register_uri_handler(http_server_handle, &light_sensor_uri);
+
+        httpd_uri_t current_hour_uri = { .uri = "/currentHour.json", .method = HTTP_GET, .handler = http_server_get_current_hour_handler };
+        httpd_register_uri_handler(http_server_handle, &current_hour_uri);
+
+        // --- Handlers para la API (POST) ---
+        httpd_uri_t set_mode_uri = { .uri = "/setMode.json", .method = HTTP_POST, .handler = http_server_set_mode_handler };
+        httpd_register_uri_handler(http_server_handle, &set_mode_uri);
+
+        httpd_uri_t set_temp_range_uri = { .uri = "/setTempFullyOpenRange.json", .method = HTTP_POST, .handler = http_server_set_temp_range_handler };
+        httpd_register_uri_handler(http_server_handle, &set_temp_range_uri);
+
+	
+
 
 		return http_server_handle;
 	}

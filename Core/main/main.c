@@ -19,10 +19,9 @@
 
 #include "wifi_app.h"
 #include "http_server.h"
+#include "tasks_common.h"
 
 #include <math.h>
-
-#include <ssd1306.h>
 
 //-------------------ADC-----------------------
 #define NTC_ADC_CH ADC_CHANNEL_7 //IO 35
@@ -34,7 +33,7 @@
 #define ADC_ATTEN  ADC_ATTEN_DB_12
 
 //-------------------PWM----------------------
-#define PWM_FREQ_HZ 1000
+#define PWM_FREQ_HZ 50
 #define SERVO_PIN GPIO_NUM_27
 
 //-----------------------------------------Struct----------------------------------------
@@ -45,29 +44,10 @@ typedef enum {
     PHOTORES_TYPE
 }adc_type_t;
 
-typedef enum {
-    SUNNY,
-    CLOUDY,
-    AFTERNOON,
-    NIGHT
-}day_state_t;
-
 typedef struct {
     float value;
     adc_type_t type;
 } adc_type_data_t;
-
-typedef enum {
-    CTL_POT,
-    CTL_THRES,
-    CTL_REG
-} servo_ctl_mode_state_t;
-
-typedef struct {
-    day_state_t day_state;
-    float current_photores;
-}http_photores_data_t;
-
 
 
 //---------------------------------------Global Vars ------------------------------------
@@ -180,8 +160,7 @@ void ntc_task(void *arg) {
         final_T = T - 273.15f; // Convert Kelvin to Celsius
 
         // VERBOSE
-        // printf("Raw: %d, Voltage_mv: %d, Vo: %.2fV, Rt: %.2f Ohms, T_Kelvin: %.2f K, T_Celsius: %.2f °C\r\n",
-        //        raw_val, voltage_mv, Vo, Rt, T, final_T);
+        
 
         ntc_item.value = final_T;
         // Ensure the queue exists and is handled correctly by the consumer task
@@ -207,6 +186,8 @@ void pot_task(void *arg) {
 
     int raw_val = 0;
     int voltage_mv = 0;
+    float voltage = 0;
+    float percent_pwm_servo = 0;
 
     while (1) {
         
@@ -215,9 +196,14 @@ void pot_task(void *arg) {
         get_raw_data(pot_adc_handle, &raw_val);
         raw_to_voltage(pot_adc_handle, raw_val, &voltage_mv);
 
-        float voltage = (float)voltage_mv / 1000.0f;
+        voltage = (float)voltage_mv / 1000.0f;
 
-        pot_item.value = voltage;
+        percent_pwm_servo = 10 * voltage;
+
+        //VERBOSE   
+        //printf("PWM [%.2f], V [%.2fV]\r\n", percent_pwm_servo, voltage);
+        
+        pot_item.value = percent_pwm_servo;
         xQueueSend(adc_data_queue, &pot_item, (TickType_t)pdMS_TO_TICKS(10));
         xSemaphoreGive(xMutex); // Release mutex
 
@@ -265,29 +251,31 @@ void photores_task(void *arg) {
 
         xSemaphoreGive(xMutex); // Release mutex
 
-        vTaskDelay(pdMS_TO_TICKS(51)); // Delay
+        vTaskDelay(pdMS_TO_TICKS(52)); // Delay
     }
 }
 
 void ctl_task(void *arg) {
 
-    float current_thres[2] = {0.0f, 0.0f};
-
     adc_type_data_t adc_item;
     float current_ntc = 0.0f;
-    float current_pot = 0.0f;
+    int current_pot = 0;
     float current_photores = 0.0f;
+
+    float current_thres[2] = {19.0f, 22.0f};
+    float new_thres[2];
+
+    servo_ctl_mode_state_t current_servo_state = CTL_IDLE;
+    servo_ctl_mode_state_t new_servo_state = CTL_IDLE;
 
     http_photores_data_t photores_data;
     day_state_t day_state = SUNNY;
 
-    int current_servo_pwm = 0.0f;
-    int new_servo_pwm = 0.0f;
-
 
     while(1) {
-        
-        if (xQueueReceive(adc_data_queue, &adc_item, portMAX_DELAY)) {
+
+        // ADC catch
+        if (xQueueReceive(adc_data_queue, &adc_item, 0) == pdPASS) {
             
             switch (adc_item.type) {
                 case NTC_TYPE:
@@ -296,7 +284,8 @@ void ctl_task(void *arg) {
                     break;
 
                 case POT_TYPE:
-                    current_pot = adc_item.value;
+                    current_pot = (int)adc_item.value;
+                    xQueueOverwrite(http_send_servo_pwm_queue, &current_pot);
                     break;
 
                 case PHOTORES_TYPE:
@@ -326,9 +315,58 @@ void ctl_task(void *arg) {
             
             
         }
+        //THRES CATCH (HTTP)
 
-        //STATE MACHINE SERVO HERE
+        if (xQueueReceive(http_receive_thres_values_queue, &new_thres, 0) == pdPASS) {
 
+            for (int i = 0; i < 2 ; i++) {
+                current_thres[i] = new_thres[i];
+            }
+
+        }
+        
+        //HANDLE SERVO CONTROL STATE
+        if (xQueueReceive(http_receive_servo_ctl_mode, &new_servo_state, 0) == pdPASS) {
+            current_servo_state = new_servo_state;   
+            printf("CURRENT CTL SERVO STATE: %d\r\n", current_servo_state);
+
+        }
+
+        //STATE MACHINE
+        
+        //VERBOSE
+        printf("POT: %d, NTC: %.2f, THRES: [%.2f, %.2f], STATE: %d\r\n", current_pot, current_ntc, current_thres[0], current_thres[1], current_servo_state);
+
+        switch(current_servo_state) {
+            case CTL_POT:
+                pwm_set_duty(&servo_pwm, &timer, current_pot);
+                printf("SERV: %d\r\n", current_pot);                
+                break;
+
+            case CTL_THRES:
+                // Condición 1: Temperatura por debajo del mínimo.
+                if (current_ntc < current_thres[0]) {
+                    pwm_set_duty(&servo_pwm, &timer, 1); // Servo en posición cerrada/mínima
+                }
+                // Condición 2: Temperatura ENTRE el mínimo y el máximo.
+                else if (current_ntc >= current_thres[0] && current_ntc <= current_thres[1]) {
+                    pwm_set_duty(&servo_pwm, &timer, 14); // Servo en posición abierta
+                }
+                // Condición 3: Todas las demás situaciones (temperatura por encima del máximo).
+                else {
+                    pwm_set_duty(&servo_pwm, &timer, 1); // Servo en otra posición (o cerrada)
+                }
+                break; // El break del case
+            case CTL_REG: //Program this later
+                break;
+
+            case CTL_IDLE:
+                pwm_set_duty(&servo_pwm, &timer, 0);
+
+                break;
+
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
@@ -348,23 +386,23 @@ void app_main(void)
 
     //QUEUES
     adc_data_queue = xQueueCreate(10, sizeof(adc_type_data_t));
-    http_send_servo_pwm_queue = xQueueCreate(10, sizeof(int));
-    http_send_ntc_queue = xQueueCreate(10, sizeof(float));
-    http_send_photores_queue = xQueueCreate(10, sizeof(http_photores_data_t));
+    http_send_servo_pwm_queue = xQueueCreate(1, sizeof(int));
+    http_send_ntc_queue = xQueueCreate(1, sizeof(float));
+    http_send_photores_queue = xQueueCreate(1, sizeof(http_photores_data_t));
     http_receive_servo_ctl_mode = xQueueCreate(10, sizeof(servo_ctl_mode_state_t));
     http_receive_thres_values_queue = xQueueCreate(10, sizeof(float)*2);
 
     //Initialize NVS
-	// esp_err_t ret = nvs_flash_init();
-	// if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
-	// {
-	// 	ESP_ERROR_CHECK(nvs_flash_erase());
-	// 	ret = nvs_flash_init();
-	// }
-	// ESP_ERROR_CHECK(ret);
+	esp_err_t ret = nvs_flash_init();
+	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+	{
+		ESP_ERROR_CHECK(nvs_flash_erase());
+		ret = nvs_flash_init();
+	}
+	ESP_ERROR_CHECK(ret);
 	
 	// Start Wifi
-	//wifi_app_start();
+	wifi_app_start();
 
     xTaskCreate(ntc_task, "ntc_task", 4096, NULL, 4, NULL);
     xTaskCreate(pot_task, "pot_task", 4096, NULL, 4, NULL);
